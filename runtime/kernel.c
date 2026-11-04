@@ -896,6 +896,17 @@ static int core_better_waiter(const RtThread *t, int c) {
     return 0;
 }
 
+// XC2_PRIO_RESCHED=1: SetThreadPriority takes effect on the virtual cores at once, as on Horizon, where the priority
+// change itself reschedules. It goes through core_kick and kern_checkpoint, so a holder gives its core up under the usual
+// rules (one holder per waiter, not while preemption is disabled). Off by default: without it a new priority counts from
+// the next core_take or core_grant, no game run has exercised it yet, and a change in core handoffs is what hung
+// MacNativeGames' game at "Continue" (see above). Holding G.
+static int g_prio_resched = -1;
+static int prio_resched_on(void) {
+    if (g_prio_resched < 0) g_prio_resched = cfg_bool("XC2_PRIO_RESCHED");
+    return g_prio_resched;
+}
+
 // Asks holders to give their cores up, one holder per waiter: waiters best first, each claims the worst holder worse
 // than itself on a core it may run on that no better waiter claimed (a request already pending is reused). Asking
 // every worse holder made several drop their cores for one waiter; the spare cores went to worse waiters, which asked
@@ -1821,9 +1832,18 @@ int kern_svc(Cpu *c, uint32_t imm) {
         }
         lock();
         RtThread *t = h_get((uint32_t)x[0], O_THREAD);
-        if (t) t->prio = (int)x[1];
+        int lowered = 0;
+        if (t) {
+            int old = t->prio;
+            t->prio = (int)x[1];
+            if (t->prio != old && g_core_wait && prio_resched_on()) {
+                core_kick();   // the thread may be a waiter now better than a holder, or a holder now worse than a waiter
+                lowered = t == tcur && t->prio > old;
+            }
+        }
         x[0] = t ? R_OK : R_BAD_HANDLE;
         unlock();
+        if (lowered) kern_checkpoint();   // does nothing unless core_kick chose this thread; rt_svc's came before the change
         return 1;
     }
     case 0x0E: {   // GetThreadCoreMask(w2 handle -> w1 core, x2 mask)

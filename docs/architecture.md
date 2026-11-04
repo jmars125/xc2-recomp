@@ -75,6 +75,9 @@ Every guest thread is a host thread. XC2 assumes Horizon's scheduler: three appl
   nxnative search) send their back-edges through `rt_spin_gate`, which pauses the core once per pass and hands it to a
   waiter after 50 us of polling (`XC2_SPIN`, `XC2_SPIN_HANDOFF_US`).
 - `XC2_FREE_CORES=1` turns the gate off, for experiments.
+- `XC2_PRIO_RESCHED=1` makes SetThreadPriority reschedule at once, as Horizon does: a waiter that became better asks a
+  holder for its core, and a holder that lowered itself below a waiter gives it up at that SVC. Off by default: it has
+  not been through a game run yet.
 
 ### 4. Graphics
 

@@ -26,7 +26,7 @@ static int failures;
 
 static uint64_t a_lock_waiter, a_cv_waiter, a_cv_order_waiter, a_arb_waiter, a_event_waiter, a_core_worker,
     a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker, a_target_worker, a_migrate_a,
-    a_migrate_b, a_migrate_fiber;
+    a_migrate_b, a_migrate_fiber, a_prio_holder;
 static uint64_t a_fib_init, a_fib_fin, a_fib_switch, a_fib_cur, tick_stub;
 
 // ---- helpers: SVCs through rt_svc, thread start and join
@@ -493,6 +493,49 @@ static void test_core_target(Cpu *c) {
            ok ? "ok" : "FAIL");
 }
 
+// ---- SetThreadPriority and the virtual cores: on core 2, a holder H lowers itself below the waiter W, then a holder
+// has its waiter raised above it from outside. With XC2_PRIO_RESCHED=1 W gets the core at the SVC or at H's next SVC;
+// otherwise H keeps the core until it exits.
+typedef struct { TargetJob self, *w; int lower, w_ran; } PrioJob;
+
+static void prio_holder(Cpu *c) {
+    PrioJob *j = arg_p(c, 0);
+    j->self.on_core = 1;
+    while (!j->self.go) plat_pause();
+    if (j->lower) sv(c, 0x0D, KERN_H_CURRENT_THREAD, 58, 0, 0);
+    else sv(c, 0x10, 0, 0, 0, 0);   // any SVC: rt_svc's checkpoint
+    j->w_ran = j->w->on_core;
+    exit_thread(c);
+}
+
+static void test_set_priority(Cpu *c) {
+    if (cfg_bool("XC2_FREE_CORES")) {
+        printf("SetThreadPriority: not checked (XC2_FREE_CORES is set)\n");
+        return;
+    }
+    int want = cfg_bool("XC2_PRIO_RESCHED"), ok = 1;
+    for (int lower = 1; lower >= 0; lower--) {
+        TargetJob w = {.go = 1};   // W exits as soon as it runs, which gives the core back to H
+        PrioJob h = {.w = &w, .lower = lower};
+        uint32_t hh = create(c, a_prio_holder, &h, 45, 2);
+        start(c, hh);
+        while (!h.self.on_core) sleep_ms(c, 1);
+        uint32_t hw = create(c, a_target_worker, &w, lower ? 50 : 55, 2);
+        start(c, hw);
+        sleep_ms(c, 20);   // W reaches its core wait
+        CHECK(!w.on_core, "the waiter ran before any priority change");
+        if (!lower) CHECK(sv(c, 0x0D, hw, 40, 0, 0) == 0, "SetThreadPriority(waiter %#x)", hw);
+        h.self.go = 1;
+        join(c, hh);
+        join(c, hw);
+        CHECK(h.w_ran == want, "%s: the waiter %s", lower ? "the holder lowered itself" : "the waiter was raised",
+              h.w_ran ? "got the core" : "did not get the core");
+        ok &= h.w_ran == want;
+    }
+    printf("SetThreadPriority: a waiter that becomes better %s the core at the holder's SVC (XC2_PRIO_RESCHED=%d): %s\n",
+           want ? "gets" : "does not get", want, ok ? "ok" : "FAIL");
+}
+
 // ---- fibers: two fibers switch to each other; each checks its callee-saved registers, sp and tpidr survive
 typedef struct { uint64_t self, other; int id; } FiberJob;
 static volatile int32_t g_switches, g_runs[3];
@@ -756,6 +799,7 @@ static void probe_main(Cpu *c) {
     test_events(c);
     test_cores(c);
     test_core_target(c);
+    test_set_priority(c);
     test_fibers(c);
     test_fiber_migrate(c);
     test_exit(c);
@@ -829,6 +873,7 @@ int probe_kernel(void) {
     a_core_worker = hostfn_register("probe-kernel core worker", core_worker);
     a_exit_entry = hostfn_register("probe-kernel exit entry", exit_entry);
     a_exit_nested = hostfn_register("probe-kernel exit nested", exit_nested);
+    a_prio_holder = hostfn_register("probe-kernel priority holder", prio_holder);
     a_target_worker = hostfn_register("probe-kernel target worker", target_worker);
     a_fiber_fn = hostfn_register("probe-kernel fiber", fiber_fn);
     a_fiber_exit_thread = hostfn_register("probe-kernel fiber exit thread", fiber_exit_thread);
