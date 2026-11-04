@@ -81,3 +81,9 @@ site xc360 main 786208 bd414901 @page:x8 bd405101 f0001168
 site xc360 main 7ba1d4 bd414901 @page:x8 bd405101 f0000fc8
 site xc360 main 6ab168 1e2a0800 @page:x8 bd404900
 site xc360 main 6a3710 a9417bfd @page:x8 bd405100 a9417bfd
+
+# XC2 3.0.1 ultrawide aspect (tools/aspect_sites_xc2.py; NOTES.md "Known gaps"). Generated from the game's main.
+set aspect XC2_ASPECT 1
+site aspect main 6aac00 1e22182b @page:x30 bd4063cb
+site aspect main 6c2c18 1e211800 @page:x30 bd4063c0
+site aspect main 6cc854 1e211800 @page:x30 bd4063c0
