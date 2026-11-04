@@ -142,6 +142,29 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   loads that size from page +0x80. Last, the u32 sum of `grlib::CGLibMemHandle::setup`, hence `RES_BUDGET_MAX` 3584 MiB.
   The abort handler: `nn::ro::detail::GetExceptionInfo` reads 4 bytes past a module's image, so `loader.c load_module`
   commits a zero page after each one, to let the game's own abort message through.
+- The centred rectangle at wide render sizes (2026-11-04; open). At 3840x1080 many cutscenes show a hard-edged rectangle
+  x 1280..2560, y 177..902 (1280x720 centred, the frames' edges measured in `build/series-4k`) and one x 1024..2816,
+  y 32..1046 (the same with 256 and 144 pixels more on each side, a factor of 1.4): inside the inner one the picture is
+  brighter, between them darker, with the rain drawn over all. Both stay fixed for the 50 frames of the flash. What was
+  read in 1.0.0: `ml::DevGraph::getRootWidth` and `getRootHeight` have no post-process caller but
+  `ml::DrPixlMemMan::setupMemBuff`; the f32 1280, 720, 640, 128 and 72 occur together only in
+  `ptlib::renderer::RenderGrObj::drawSortAndNormal`, the radial blur of emitter type 13, which passes pixel rectangles
+  to `ScreenRenderManager::RenderScreen`, but those rectangles start at the left edge, not at the centre, so it does
+  not match; the grlib context's 1280x720 at +0x2638 is the current viewport, which `setViewport` overwrites;
+  `setViewport`'s callers (`setMainViewPort`, `setFinalViewPort`, `DrPixlPostMan::render`) use the target's own size.
+  A rectangle of exactly 1280x720 pixels, centred, with no such constant in the code, points at geometry from data: a
+  screen-space ptlib emitter, sized in pixels in its effect file, whose shader maps pixels to clip space with the render
+  size (`RenderGrObj::draw` stores 1/width and 1/height at +0x80): an assumption, the shaders were not read.
+  Found on the way, and fixed in the set size: `setupMemBuff` lays out the byte offsets of all post-process targets from
+  the 1280x720 canvas while the targets take the render size, so past 720p they overlap in memory, and the Vulkan back end
+  binds them at those offsets (`vk_texture.c`). This is the likeliest meaning of emoose's remark that a larger size
+  breaks some cutscene effects in the emulators, and it may or may not be the rectangle. Running 1.0.0's `setupMemBuff` in
+  Unicorn with the size calls stubbed at 4 bytes per pixel: 141 targets, 336 MiB at 1280x720, 94 of them with a size
+  from the canvas. So GLIBPXL is budgeted as 362 MiB times pixels over 1280x720 (`resolution.c decide`): 3840x1080
+  takes 1629 MiB and a 4.5 GiB application pool, 5120x1440 2896 MiB, and 7680x2160 needs 6516 MiB, past the 3584 MiB
+  `RES_BUDGET_MAX`, so its table is laid out for 5694x1600 and overlaps above that.
+  Next step if the rectangle remains: a frame capture of one of the frames above, looking for the draw that writes
+  exactly that rectangle, then its shader and its uniforms.
 - 60 fps, 3.0.1 (2026-11-02; on by default, `XC2_FPS_LIMIT=30` or `XC2_FPS60=0` for the shipping 30):
   - Frame pacing is a spin in the main thread, main+0x6aafd8: it reads the system tick until the time since the frame
     began exceeds period * interval * 0.997 (constant main+0x9b558c). The period comes from virtual +0xd0 of the object

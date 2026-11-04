@@ -42,6 +42,17 @@ GLIBPXL past about 400 MiB has no room whatever the pool and the budget say, and
 replaces that orr with `adrp x<r>, <patch page> ; ldr w<r>, [x<r>, #0x80]`, where res_init stores 512 MiB plus what the
 budget grew by; the load zero-extends as the orr did and the register is free to hold the page address.
 
+The render target table. The post-process targets' sizes follow the render size (ml::DrPixlMan::resetColorBuff and its
+users read DrMan +0x5b8), but where each one lies does not: ml::DrPixlMemMan::setupMemBuff (1.0.0 main+0x849fc4, called
+once from the DrMan constructor) computes every target's byte offset in the resident pixel area, and that area's total,
+from getRootWidth() and getRootHeight(), the fixed 1280x720 canvas; grlib::CGLibRenderTarget::setTextureInfo then places
+a target of the render size at an offset laid out for 720p. Past 1280x720 the targets overlap each other, and since the
+Vulkan back end binds images onto pool memory at the guest's offsets (runtime/vk_texture.c), they really share memory.
+The set size replaces the two `bl` at its start (1.0.0 main+0x849ffc / +0x84a004, 3.0.1 main+0x791a34 / +0x791a3c) with
+`adrp x0, <patch page> ; ldr w0, [x0, #0x84]` and #0x88: the table is laid out for the size res_init stores there, the
+canvas itself stays 1280x720 for the interface and everything else. The call only left a result in w0 and clobbered the
+caller-saved registers, so x0 is free. The area's total then grows with the pixels, which GLIBPXL has to hold.
+
 The render scale. The game's dynamic resolution (lib_nx.ini: red_sclX / red_sclY the docked scale, red_hdsclX / Y
 the handheld one, red_Auto the automatic stepping; the file lives inside bf2.ard, not loose in the RomFS, its path
 string is 3.0.1 main+0x9ab4d5) ends in ml::DrPixlPostParm::isReductionBuffer(const DrCalcGpuCost *, bool, int width,
@@ -65,7 +76,8 @@ Patch page slot map (the page is the first 4 KiB after main's image; the runtime
   +0x70           scale: f32 render scale in percent (100 = the render size)
   +0x78           size: u64, the pixel memory budget (GLIBPXL) in the top 32 bits, the low 32 zero
   +0x80           size: u32, the graphic region (ml::WorkRootParam, the parent of GLIBTOP)
-  +0x84 .. +0x9f  reserved for the sets of this file (+0xa0 and up: the interface sets)
+  +0x84, +0x88    size: u32 width and height the render target table is laid out for
+  +0x8c .. +0x9f  free, for the sets of this file (+0xa0 and up: the interface sets)
 
 How the sites are found. The size site: `movz w<a>, #1280` right before `movz w<b>, #720`, a and b callee-saved
 (x19 .. x28) and distinct, followed within 8 instructions by `mov w1, w<a> ; mov w2, w<b>` and a blr, and once more
@@ -74,7 +86,8 @@ site: `movz x<r>, #imm, lsl #48` with the immediate between 0x1000 and 0x4000 (2
 `movk x<r>, #imm, lsl #16`, with `str x<r>, [sp, #8]`, the struct's first constant (movz w, #0x280, lsl #16) and a
 call within 40 instructions; one such place at most. The graphic region site: `movz w<r>, #0x8c40, lsl #16 ; stp xzr,
 x<r>, [sp, #a] ; movz w<r>, #0xd80, lsl #16 ; stp xzr, x<r>, [sp, #a + 0x10] ; orr w<r>, wzr, #0x20000000` with
-`stp xzr, x<r>, [sp, #a + 0x20]` within 3 instructions; one such place at most. The scale
+`stp xzr, x<r>, [sp, #a + 0x20]` within 3 instructions; one such place at most. The target table site: `bl ; mov w<r>,
+w0 ; bl ; scvtf s<a>, w<r> ; fmov s<b>, #0.5`; one such place at most. The scale
 sites: a load of the f32 100.0 (adrp x<n> ; ldr s<p>, [x<n>, #lo]) followed within 4 instructions by
 `fmul s<x>, s<x>, s<p>` and `fmul s<y>, s<y>, s<p>` with x and y distinct, each converted by fcvtzu within the next 8
 instructions, and the f32 0.01 loaded within 24; a main with other than one such place stops the script. A 100.0
@@ -102,7 +115,7 @@ from aspect_sites_xc2 import (BUILD_IDS, Image, adrp, adrp_target, bl, f32, gate
 
 SIZE_SET, SIZE_ENV = 'size', 'XC2_RENDER_RES'
 SCALE_SET, SCALE_ENV = 'scale', 'XC2_FIXED_SCALE'
-SLOT_W, SLOT_H, SLOT_SCALE, SLOT_BUDGET, SLOT_GRAPHIC = 0x68, 0x6c, 0x70, 0x78, 0x80
+SLOT_W, SLOT_H, SLOT_SCALE, SLOT_BUDGET, SLOT_GRAPHIC, SLOT_TABLE_W, SLOT_TABLE_H = 0x68, 0x6c, 0x70, 0x78, 0x80, 0x84, 0x88
 BUDGET_MIN, BUDGET_MAX = 0x1000, 0x4000   # the movz immediate (lsl #48): a budget of 256 MiB to 1 GiB
 BUDGET_NEAR = 40                          # instructions around the movz for the struct's other constants
 WIDTH, HEIGHT = 1280, 720
@@ -116,6 +129,7 @@ SETUP = '_ZN5grlib12CGLibDisplay5setupEP9NVNdevice'
 DEVICE_INIT = '_ZN5grlib12CGLibManager10deviceInitEv'
 NN_MAIN = 'nnMain'
 ORR_GRAPHIC = 0x320303E0      # orr w0, wzr, #0x20000000; | the register
+MEM_BUFF = '_ZN2ml12DrPixlMemMan12setupMemBuffEv'
 REDUCTION = '_ZN2ml14DrPixlPostParm17isReductionBufferEPKNS_13DrCalcGpuCostEbii'
 # (width movz, height movz), the budget movz and (fmul of the width scale, fmul of the height scale) per version,
 # text offsets
@@ -123,10 +137,12 @@ KNOWN = {'2.0.2': {'size': (0x6ffcac, 0x6ffcb0), 'budget': None, 'scale': None, 
          '2.1.0': {'size': (0x6ffdc0, 0x6ffdc4), 'budget': None, 'scale': None, 'graphic': None},     # Fl4sh_'s "2560x1440 v2.1.0"
          # 1.0.0: this script's result (2026-11-03), read in the disassembly: grlib::CGLibDisplay::setup+0x118,
          # grlib::CGLibManager::deviceInit+0x98 and ml::DrPixlPostParm::isReductionBuffer+0x124 / +0x12c
-         '1.0.0': {'size': (0x7a81c0, 0x7a81c4), 'budget': 0x790c84, 'scale': (0x85ca94, 0x85ca9c), 'graphic': 0x6a0474},
+         '1.0.0': {'size': (0x7a81c0, 0x7a81c4), 'budget': 0x790c84, 'scale': (0x85ca94, 0x85ca9c), 'graphic': 0x6a0474,
+                   'table': (0x849ffc, 0x84a004)},   # ml::DrPixlMemMan::setupMemBuff+0x38 / +0x40
          '3.0.0': {'size': None, 'budget': None, 'scale': (0x7a1510, 0x7a1518), 'graphic': None},     # the fmul after rsc-pl's ldr at 0x7a150c
          # 3.0.1 (stripped): the same shapes, the size site being the 2.1.0 one plus the +0x880 drift
-         '3.0.1': {'size': (0x700640, 0x700644), 'budget': 0x6f4f74, 'scale': (0x7a1510, 0x7a1518), 'graphic': 0x6421c4}}
+         '3.0.1': {'size': (0x700640, 0x700644), 'budget': 0x6f4f74, 'scale': (0x7a1510, 0x7a1518), 'graphic': 0x6421c4,
+                   'table': (0x791a34, 0x791a3c)}}
 
 
 # ---- encoders and decoders the aspect finder lacks
@@ -321,6 +337,20 @@ def graphic_site(img):
     return sites
 
 
+# ---- the render target table site
+def table_site(img):
+    """[(address, word, replacement)] for the two calls of the root size getters that start
+    ml::DrPixlMemMan::setupMemBuff; [] or, when several places match, all of them."""
+    sites = []
+    end = img.text[0] + img.text[1]
+    for a in img.text_range(img.text[0], end - 16):
+        w, v, x, y, z = (img.word(a + 4 * i) for i in range(5))
+        if w >> 26 == 0x25 and v & 0xFFFFFFE0 == 0x2A0003E0 and x >> 26 == 0x25 and y & 0xFFFFFC00 == 0x1E220000 \
+                and (y >> 5) & 31 == v & 31 and z & 0xFFFFFFE0 == 0x1E2C1000:   # scvtf s, w<r> ; fmov s, #0.5
+            sites += [(a, w, [('page', 0), ldr_w(0, 0, SLOT_TABLE_W)]), (a + 8, x, [('page', 0), ldr_w(0, 0, SLOT_TABLE_H)])]
+    return sites
+
+
 # ---- the scale sites
 def scale_sites(img):
     """[(fmul address, word, replacement)] for the two fmul by the f32 100.0 that make the whole percents, and the
@@ -358,7 +388,7 @@ def scale_sites(img):
 
 
 # ---- the known sites and the symbols
-def check_known(version, size, budget, scale, graphic=(), known=KNOWN):
+def check_known(version, size, budget, scale, graphic=(), known=KNOWN, table=()):
     """[(text, ok)] comparing the scan with the sites recorded for this version."""
     k = known.get(version)
     if not k:
@@ -384,10 +414,15 @@ def check_known(version, size, budget, scale, graphic=(), known=KNOWN):
         ok = have == k['graphic']
         out.append((f'{"agree" if ok else "disagree"} graphic main+{k["graphic"]:#x}'
                     + ('' if ok else f': the scanner has {"none" if have is None else f"main+{have:#x}"}'), ok))
+    have = tuple(t[0] for t in table)
+    if k.get('table'):
+        ok = have == k['table']
+        out.append((f'{"agree" if ok else "disagree"} table main+{k["table"][0]:#x} / main+{k["table"][1]:#x}'
+                    + ('' if ok else f': the scanner has {", ".join(f"main+{a:#x}" for a in have) or "none"}'), ok))
     return out
 
 
-def check_symbols(img, size, budget, scale, graphic=()):
+def check_symbols(img, size, budget, scale, graphic=(), table=()):
     """When main keeps its symbols: whether the sites lie in the functions the names say, and who calls the scale's."""
     if not img.symbolic:
         return []
@@ -405,6 +440,9 @@ def check_symbols(img, size, budget, scale, graphic=()):
     for a, _, _, _ in graphic:
         lines.append(f'graphic site main+{a:#x} lies in {img.name_of(a)}'
                      + ('' if img.name_of(a).startswith(NN_MAIN + '+') else f', NOT in {NN_MAIN}'))
+    for a, _, _ in table:
+        lines.append(f'table site main+{a:#x} lies in {img.name_of(a)}'
+                     + ('' if img.name_of(a).startswith(MEM_BUFF + '+') else f', NOT in {MEM_BUFF}'))
     if REDUCTION in img.syms:
         f = img.syms[REDUCTION][0]
         callers = sorted({img.name_of(b) for b in img.text_range()
@@ -414,12 +452,12 @@ def check_symbols(img, size, budget, scale, graphic=()):
 
 
 # ---- output
-def emit(size, budget, scale, version, out=sys.stdout, graphic=()):
+def emit(size, budget, scale, version, out=sys.stdout, graphic=(), table=()):
     print(f'# XC2 {version} render size and scale (tools/size_sites_xc2.py; NOTES.md "Known gaps"). Generated from the '
           'game\'s main.', file=out)
-    if size or budget or graphic:
+    if size or budget or graphic or table:
         print(f'set {SIZE_SET} {SIZE_ENV} 1', file=out)
-        for a, w, repl in (size[0][0] if size else []) + [(a, w, repl) for a, w, repl, _ in list(budget) + list(graphic)]:
+        for a, w, repl in (size[0][0] if size else []) + [(a, w, repl) for a, w, repl, _ in list(budget) + list(graphic)] + list(table):
             print(f'site {SIZE_SET} main {a:x} {w:08x} ' + ' '.join(word(r) for r in repl), file=out)
     if scale:
         print(f'set {SCALE_SET} {SCALE_ENV} 1', file=out)
@@ -431,7 +469,7 @@ def word(r):
     return f'@page:x{r[1]}' if isinstance(r, tuple) else f'{r:08x}'
 
 
-def report(img, size, size_info, budget, budget_info, scale, scale_info, pairs, known, symbols, out=sys.stderr, graphic=()):
+def report(img, size, size_info, budget, budget_info, scale, scale_info, pairs, known, symbols, out=sys.stderr, graphic=(), table=()):
     if size:
         (w, h), (first, second) = size[0]
         print(f'site main+{w[0]:#x} {img.name_of(w[0])}: render width, movz w{w[1] & 31} -> +{SLOT_W:#x}; height at '
@@ -442,6 +480,8 @@ def report(img, size, size_info, budget, budget_info, scale, scale_info, pairs, 
               f'+{SLOT_BUDGET:#x}', file=out)
     for a, w, repl, bytes_ in graphic:
         print(f'site main+{a:#x} {img.name_of(a)}: graphic region {bytes_ >> 20} MiB, orr w{w & 31} -> +{SLOT_GRAPHIC:#x}', file=out)
+    for (a, w, repl), slot in zip(table, (SLOT_TABLE_W, SLOT_TABLE_H)):
+        print(f'site main+{a:#x} {img.name_of(a)}: render target table, bl of the root size -> +{slot:#x}', file=out)
     for a, w, repl in sorted(scale):
         print(f'site main+{a:#x} {img.name_of(a)}: render scale, fmul s{w & 31} by 100.0 -> +{SLOT_SCALE:#x} through '
               f'x{repl[0][1]}', file=out)
@@ -455,7 +495,7 @@ def report(img, size, size_info, budget, budget_info, scale, scale_info, pairs, 
         print(f'known: {text}', file=out)
     for text in symbols:
         print(f'symbols: {text}', file=out)
-    print(f'# {"1 size site" if size else "no size site"}, {len(budget)} budget site, {len(graphic)} graphic site, {len(scale)} scale sites, '
+    print(f'# {"1 size site" if size else "no size site"}, {len(budget)} budget site, {len(graphic)} graphic site, {len(table)} table sites, {len(scale)} scale sites, '
           f'{len(size_info) + len(budget_info) + len(scale_info)} left unpatched, {len(pairs)} size pairs', file=out)
 
 
@@ -502,11 +542,16 @@ def selftest():
     code += [NOP] * BUDGET_NEAR
     code += [STP, movz_x(10, 0x2000, 3), movk_x(10, 0x100, 1), str_x_sp8(10), LDP, RET]
     b2 = len(code) * 4 - 20
+    code += [NOP] * BUDGET_NEAR   # keeps the call below out of the window around the decoy
     # nnMain's ml::WorkRootParam fill: the three region sizes, the third being the graphic region
     f7 = len(code) * 4
     code += [STP, 0x52A00000 | 0x8c40 << 5 | 8, stp_xzr_sp(8, 0x20), 0x52A00000 | 0xd80 << 5 | 8, stp_xzr_sp(8, 0x30),
              ORR_GRAPHIC | 8, 0x910063E0, stp_xzr_sp(8, 0x40), LDP, RET]   # add x0, sp, #0x18
     g1g = f7 + 20
+    # the start of the target table: the root getters of the first function, then an int to float and 0.5
+    f8 = len(code) * 4
+    code += [STP, bl(f8 + 4, g1), mov_w(24, 0), bl(f8 + 12, g1 + 8), 0x1E220309, 0x1E2C1008, LDP, RET]   # scvtf s9, w24 ; fmov s8, #0.5
+    t1 = f8 + 4
     # the same orr without the two region sizes before it: no site
     code += [ORR_GRAPHIC | 8, stp_xzr_sp(8, 0x40), RET]
     text = b''.join(struct.pack('<I', w) for w in code)
@@ -515,7 +560,7 @@ def selftest():
     image[rodata_base:rodata_base + len(rod)] = rod
     syms = [(SETUP, 0, 1, f1, g1 - f1), ('getters', 0, 1, g1, g2 - g1), ('decoy', 0, 1, g2, f3 - g2),
             (REDUCTION, 0, 1, f3, f4 - f3), ('one_mul', 0, 1, f4, f6 - f4), (DEVICE_INIT, 0, 1, f6, b2 - 4 - f6),
-            ('decoy_budget', 0, 1, b2 - 4, f7 - b2 + 4), (NN_MAIN, 0, 1, f7, g1g + 20 - f7)]
+            ('decoy_budget', 0, 1, b2 - 4, f7 - b2 + 4), (NN_MAIN, 0, 1, f7, f8 - f7), (MEM_BUFF, 0, 1, f8, 32)]
     syms += [(f'pad_{i}', 0, 1, 0x3000 + 4 * i, 4) for i in range(1000)]   # a table large enough to count as kept
     img = Image(image, (0, len(text)), (rodata_base, len(rod)), (rodata_base + len(rod), 0), syms=syms,
                 build_id=BUILD_IDS['3.0.1'].upper() + '0' * 48)
@@ -535,22 +580,26 @@ def selftest():
     graphic = graphic_site(img)
     assert graphic == [(g1g, ORR_GRAPHIC | 8, [('page', 8), ldr_w(8, 8, SLOT_GRAPHIC)], 0x20000000)], graphic
     assert ldr_w(8, 8, SLOT_GRAPHIC) == 0xB9408108
+    table = table_site(img)
+    assert [t[0] for t in table] == [t1, t1 + 8] and table[0][2] == [('page', 0), ldr_w(0, 0, SLOT_TABLE_W)] and \
+        table[1][2] == [('page', 0), ldr_w(0, 0, SLOT_TABLE_H)], table
+    assert ldr_w(0, 0, SLOT_TABLE_H) == 0xB9408800
     scale, scale_info = scale_sites(img)
     assert [s[0] for s in scale] == [s1, s2], ([hex(s[0]) for s in scale], scale_info)
     assert scale[0][1:] == (fmul_s(2, 2, 0), [('page', 8), ldr_s(2, 8, SLOT_SCALE), adrp(s1, rodata_base, 8)]), scale[0]
     assert scale[1][1:] == (fmul_s(1, 1, 0), [('page', 8), ldr_s(1, 8, SLOT_SCALE), adrp(s2, rodata_base, 8)]), scale[1]
     assert adrp_target(s1, scale[0][2][2]) == rodata_base, 'x8 is pointed back at the constant page'
     assert scale_info == [], scale_info
-    symbols = check_symbols(img, size, budget, scale, graphic)
-    assert len(symbols) == 6 and all('NOT' not in s for s in symbols) and symbols[5].endswith('nowhere (inlined)'), symbols
+    symbols = check_symbols(img, size, budget, scale, graphic, table)
+    assert len(symbols) == 8 and all('NOT' not in s for s in symbols) and symbols[7].endswith('nowhere (inlined)'), symbols
     stripped = Image(image, img.text, img.rodata, img.data)
     assert not stripped.symbolic and check_symbols(stripped, size, budget, scale) == []
     assert size_site(stripped)[0] == size and scale_sites(stripped)[0] == scale and budget_site(stripped)[0] == budget
-    assert graphic_site(stripped) == graphic
-    known = {'3.0.1': {'size': (p1, p1 + 4), 'budget': b1, 'scale': (s1, s2 + 4), 'graphic': g1g},
+    assert graphic_site(stripped) == graphic and table_site(stripped) == table
+    known = {'3.0.1': {'size': (p1, p1 + 4), 'budget': b1, 'scale': (s1, s2 + 4), 'graphic': g1g, 'table': (t1, t1 + 8)},
              '1.0.0': {'size': None, 'budget': b2, 'scale': (s1, s2), 'graphic': None}}
-    result = check_known('3.0.1', size, budget, scale, graphic, known)
-    assert [ok for _, ok in result] == [True, True, False, True] and result[2][0].startswith('disagree scale'), result
+    result = check_known('3.0.1', size, budget, scale, graphic, known, table)
+    assert [ok for _, ok in result] == [True, True, False, True, True] and result[2][0].startswith('disagree scale'), result
     assert check_known('1.0.0', size, budget, scale, graphic, known) == [(f'disagree budget main+{b2:#x}: the scanner has main+{b1:#x}', False),
                                                                         (f'agree scale main+{s1:#x} / main+{s2:#x}', True)]
     assert check_known('2.1.0', [], [], [], (), known) == [] and check_known('3.0.1', [], [], [], (), known)[0][0].endswith('has none')
@@ -558,32 +607,32 @@ def selftest():
     with tempfile.TemporaryDirectory() as d:
         path = Path(d) / 'patches.txt'
         with open(path, 'w') as f:
-            emit(size, budget, scale, 'selftest', f, graphic)
+            emit(size, budget, scale, 'selftest', f, graphic, table)
         mods = [('main', 0x10000000, len(image)), ('sdk', 0x10400000, 0x1000)]
-        table = patches.load(path, mods)
-        assert table.sets == [(SIZE_SET, SIZE_ENV, 1), (SCALE_SET, SCALE_ENV, 1)]
-        assert sorted(table.sites['main']) == sorted([p1, p1 + 4, b1, g1g, s1, s2])
+        parsed = patches.load(path, mods)
+        assert parsed.sets == [(SIZE_SET, SIZE_ENV, 1), (SCALE_SET, SCALE_ENV, 1)]
+        assert sorted(parsed.sites['main']) == sorted([p1, p1 + 4, b1, g1g, t1, t1 + 8, s1, s2])
 
         class Mod:
             base = 0x10000000
             def in_text(self, a): return img.in_text(a - self.base)
             def word(self, a): return img.word(a - self.base)
-        patches.check(table, Mod(), 'main')
-        resolved = table.for_module('main', 0x10000000)
-        assert all(adrp_target(a, words[0]) == table.page for a, (_, words) in resolved.items()), 'adrp to the page'
-        assert resolved[0x10000000 + p1][1] == [adrp(0x10000000 + p1, table.page, 21), ldr_w(21, 21, SLOT_W)]
+        patches.check(parsed, Mod(), 'main')
+        resolved = parsed.for_module('main', 0x10000000)
+        assert all(adrp_target(a, words[0]) == parsed.page for a, (_, words) in resolved.items()), 'adrp to the page'
+        assert resolved[0x10000000 + p1][1] == [adrp(0x10000000 + p1, parsed.page, 21), ldr_w(21, 21, SLOT_W)]
         assert resolved[0x10000000 + s1][1][2] == adrp(s1, rodata_base, 8), 'the restore adrp is the site\'s own'
-        assert resolved[0x10000000 + b1][1] == [adrp(0x10000000 + b1, table.page, 9), ldr_x(9, 9, SLOT_BUDGET)]
+        assert resolved[0x10000000 + b1][1] == [adrp(0x10000000 + b1, parsed.page, 9), ldr_x(9, 9, SLOT_BUDGET)]
         bad = Image(bytes(image[:p1]) + b'\0\0\0\0' + bytes(image[p1 + 4:]), img.text, img.rodata, img.data)
         try:
             class BadMod(Mod):
                 def word(self, a): return bad.word(a - self.base)
-            patches.check(table, BadMod(), 'main')
+            patches.check(parsed, BadMod(), 'main')
         except patches.PatchError:
             pass
         else:
             raise AssertionError('a changed original word must fail the check')
-    print('size_sites_xc2: selftest ok (the size site with its two texture calls, the budget site, the graphic region site, 2 scale sites, 2 '
+    print('size_sites_xc2: selftest ok (the size site with its two texture calls, the budget site, the graphic region site, the target table site, 2 scale sites, 2 '
           'unpatched, 3 size pairs, known-site and symbol checks)')
 
 
@@ -604,6 +653,9 @@ def main():
     budget, budget_info = budget_site(img)
     scale, scale_info = scale_sites(img)
     graphic = graphic_site(img)
+    table = table_site(img)
+    if len(table) > 2:
+        sys.exit('size_sites_xc2: more than one render target table in main: ' + ', '.join(f'main+{t[0]:#x}' for t in table))
     if len(graphic) > 1:
         sys.exit('size_sites_xc2: more than one graphic region in main: ' + ', '.join(f'main+{g[0]:#x}' for g in graphic))
     if len(size) > 1:
@@ -615,10 +667,10 @@ def main():
     if not size and not scale:
         sys.exit('size_sites_xc2: neither the render size nor the render scale site in main')
     pairs = size_pairs(img)
-    known = check_known(version, size, budget, scale, graphic)
-    symbols = check_symbols(img, size, budget, scale, graphic)
-    emit(size, budget, scale, version or f'unknown version, build id {img.build_id[:16]} (--no-gate)', graphic=graphic)
-    report(img, size, size_info, budget, budget_info, scale, scale_info, pairs, known, symbols, graphic=graphic)
+    known = check_known(version, size, budget, scale, graphic, table=table)
+    symbols = check_symbols(img, size, budget, scale, graphic, table)
+    emit(size, budget, scale, version or f'unknown version, build id {img.build_id[:16]} (--no-gate)', graphic=graphic, table=table)
+    report(img, size, size_info, budget, budget_info, scale, scale_info, pairs, known, symbols, graphic=graphic, table=table)
 
 
 if __name__ == '__main__':

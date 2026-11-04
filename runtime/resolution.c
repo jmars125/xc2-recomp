@@ -15,7 +15,11 @@
 //           count, and res_heap_extra_bytes grows the application pool by the same bytes, so the heap the game asks
 //           for (nninitStartup: TotalMemorySize - UsedMemorySize, memory.c mem_info) holds the larger region. GLIBTOP's
 //           parent is the graphic region, which nnMain sizes with a constant 512 MiB in ml::WorkRootParam; the set's
-//           fourth site loads that from +0x80, where res_init stores 512 MiB plus what the budget grew by.
+//           fourth site loads that from +0x80, where res_init stores 512 MiB plus what the budget grew by. The post-
+//           process targets take the render size, but ml::DrPixlMemMan::setupMemBuff lays out their offsets in that
+//           memory from the 1280x720 canvas, so past 1280x720 they overlap, and the back end binds them onto the pool
+//           at those offsets: they really share memory. The set's last two sites give setupMemBuff the render size
+//           from +0x84 / +0x88 in place of the canvas's, and GLIBPXL is budgeted for what it then lays out.
 //   scale   The game's dynamic resolution (lib_nx.ini red_sclX / red_sclY / red_Auto) ends in
 //           ml::DrPixlPostParm::isReductionBuffer, which multiplies the scale pair by 100.0 and draws the scene at
 //           width * percent / 100. The set loads both percents from +0x70, where res_init stores 100 when the set
@@ -36,6 +40,7 @@
 // XC2_PICTURE_FIT decides the bars when the window's shape differs. Without the sets (a build whose patch table was
 // made before the finders ran, or another game version) the picture stays the game's own 1280x720 at 16:9, and one
 // line per set says so.
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -62,7 +67,8 @@
 #define PAGE_UI_RENDER 0xc0 // f32 x 2, the render size: the viewport the interface's last step restores
 #define PAGE_GRAPHIC 0x80   // u32, the graphic region (the set size's fourth site); +0x84 .. +0x9f are this file's, +0xa0 and up the interface's
 #define PXL_BUDGET RES_BUDGET_GAME      // the game's GLIBPXL region: 362 MiB in 3.0.1 (1.0.0 has 342 MiB)
-#define BUDGET_PIXELS (3840ull * 1080)  // the largest picture that ran within the game's budget
+#define PAGE_TABLE_W 0x84   // u32 size the render target table is laid out for (the set size's last two sites)
+#define PAGE_TABLE_H 0x88
 #define GRAPHIC_REGION 0x20000000ull    // nnMain's ml::WorkRootParam: the parent region of GLIBTOP
 #define ASPECT_EPS 0.005f   // 1366x768 counts as 16:9; 16:10 and 21:9 do not
 
@@ -70,13 +76,14 @@ static struct {
     int decided;
     unsigned ow, oh;   // output: the size and shape the picture is drawn at with the set size, its shape without (XC2_OUTPUT_RES)
     unsigned rw, rh;   // the render size: ow x oh when the set size is on, else the game's 1280x720
+    unsigned tw, th;   // the size the render target table is laid out for: ow x oh, less past RES_BUDGET_MAX
     int size;          // the set size is on
     int aspect;        // the set aspect is on: the 3D view is laid out for ow:oh
     int ui;            // the set ui is on: the interface is drawn in the centred 16:9 rectangle of the picture
     int scale;         // XC2_RENDER_SCALE in percent, 0 for game
     int fixed;         // the set scale is on: the scene is drawn at percent of the render size, the game's dynamic resolution off
     int percent;       // that percent
-    uint64_t budget;   // the pixel memory budget the set size stores: the game's, grown with the pixel count past BUDGET_PIXELS
+    uint64_t budget;   // the pixel memory budget the set size stores: the game's, grown with the pixel count past 1280x720
     uint64_t extra;    // what the application pool and the graphic region grow by for it (res_heap_extra_bytes)
 } R;
 
@@ -100,12 +107,20 @@ static void decide(void) {
     }
     uint64_t pixels = (uint64_t)R.ow * R.oh;
     R.budget = PXL_BUDGET;
-    if (pixels > BUDGET_PIXELS)   // the targets grow with the pixels: the budget in the same proportion, whole MiB
-        R.budget = (PXL_BUDGET * pixels / BUDGET_PIXELS + (1u << 20) - 1) & ~((1ull << 20) - 1);
-    if (R.budget > RES_BUDGET_MAX) {   // past this the u32 sums of grlib::CGLibMemHandle::setup would wrap
+    R.tw = R.ow, R.th = R.oh;
+    // Nearly all of GLIBPXL at 1280x720 is the target table and the window textures, which grow with the pixels: the
+    // budget in the same proportion, whole MiB.
+    if (pixels > GAME_W * GAME_H)
+        R.budget = (PXL_BUDGET * pixels / (GAME_W * GAME_H) + (1u << 20) - 1) & ~((1ull << 20) - 1);
+    if (R.budget > RES_BUDGET_MAX) {
+        // Past this the u32 sums of grlib::CGLibMemHandle::setup would wrap. The table is laid out for a smaller size of
+        // the same shape that fits: its targets overlap again, the less the nearer the output is to the limit.
+        double fit = sqrt((double)RES_BUDGET_MAX / (double)R.budget);
+        R.tw = (unsigned)(R.ow * fit) & ~1u, R.th = (unsigned)(R.oh * fit) & ~1u;
         rt_log("resolution: %ux%u needs a pixel memory budget of %llu MiB; it stops at %llu MiB, the most the game's "
-               "32-bit region sizes hold", R.ow, R.oh, (unsigned long long)(R.budget >> 20),
-               (unsigned long long)(RES_BUDGET_MAX >> 20));
+               "32-bit region sizes hold. The render target table is laid out for %ux%u: past that size its targets "
+               "overlap, which can show as wrong effects", R.ow, R.oh, (unsigned long long)(R.budget >> 20),
+               (unsigned long long)(RES_BUDGET_MAX >> 20), R.tw, R.th);
         R.budget = RES_BUDGET_MAX;
     }
     R.extra = R.budget - PXL_BUDGET;
@@ -120,7 +135,7 @@ static void decide(void) {
 
 // TotK Recomp grows the texture heap through its HeapDef table; XC2 has no such table, but its pixel memory budget
 // is a constant carved from its heap (GLIBPXL, see the top), so the application pool grows by what the set size adds
-// to that budget for an output larger than BUDGET_PIXELS, and the game's heap request grows with the pool. Decided
+// to that budget for an output larger than 1280x720, and the game's heap request grows with the pool. Decided
 // with the sizes (memory.c mem_init asks before the guest starts); the pool grows whether or not the set is there,
 // which costs nothing but address space.
 uint64_t res_heap_extra_bytes(void) {
@@ -188,6 +203,8 @@ void res_init(void) {
         memcpy(page + PAGE_HEIGHT, &h, sizeof h);
         memcpy(page + PAGE_BUDGET, &budget, sizeof budget);
         memcpy(page + PAGE_GRAPHIC, &graphic, sizeof graphic);
+        memcpy(page + PAGE_TABLE_W, &R.tw, sizeof R.tw);
+        memcpy(page + PAGE_TABLE_H, &R.th, sizeof R.th);
         int wanted = rt_patch_enabled(set), on = wanted && (R.ow != GAME_W || R.oh != GAME_H);
         rt_patch_switch(set, on);
         R.size = on;
@@ -195,9 +212,9 @@ void res_init(void) {
             R.rw = R.ow, R.rh = R.oh;
             rt_log("resolution: render size %ux%u (the display's window textures, set size)", R.rw, R.rh);
             if (R.budget != PXL_BUDGET)
-                rt_log("resolution: pixel memory budget %llu MiB (the game's %llu MiB holds up to %llux%llu); the "
-                       "application pool grows by %llu MiB", (unsigned long long)(R.budget >> 20),
-                       (unsigned long long)(PXL_BUDGET >> 20), 3840ull, 1080ull, (unsigned long long)(R.extra >> 20));
+                rt_log("resolution: pixel memory budget %llu MiB (the game's %llu MiB holds %ux%u); the application pool "
+                       "and the graphic region grow by %llu MiB", (unsigned long long)(R.budget >> 20),
+                       (unsigned long long)(PXL_BUDGET >> 20), GAME_W, GAME_H, (unsigned long long)(R.extra >> 20));
         } else {
             rt_log("resolution: render size %ux%u, the game's own (%s)", GAME_W, GAME_H,
                    wanted ? "XC2_OUTPUT_RES is 1280x720" : "XC2_RENDER_RES=0");
