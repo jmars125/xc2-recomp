@@ -25,7 +25,8 @@ static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("  FAIL: " __VA_ARGS__); putchar('\n'); } } while (0)
 
 static uint64_t a_lock_waiter, a_cv_waiter, a_cv_order_waiter, a_arb_waiter, a_event_waiter, a_core_worker,
-    a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker, a_target_worker;
+    a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker, a_target_worker, a_migrate_a,
+    a_migrate_b, a_migrate_fiber;
 static uint64_t a_fib_init, a_fib_fin, a_fib_switch, a_fib_cur, tick_stub;
 
 // ---- helpers: SVCs through rt_svc, thread start and join
@@ -561,6 +562,72 @@ static void test_fibers(Cpu *c) {
     CHECK(ok, "fiber ping-pong");
 }
 
+// ---- a fiber resumed on another thread: the host depth goes with the fiber into the thread that runs it now. Thread A
+// starts fiber F, which raises its depth and switches back; thread B, at another depth, then resumes F. The depths are
+// written directly so that they differ, and tracking is on so that SwitchToFiber runs in hostfn_tracked as it does in the
+// game. A's depth must survive F's resume on B, F's must arrive on B, and SwitchToFiber's decrement must land on B too.
+#define DEPTH_A 3
+#define DEPTH_B 5
+#define DEPTH_F 40
+typedef struct { uint64_t fiber, stack; void *a, *b; int a_after, b_after, f_on_a, f_on_b, a_kept; volatile int stage; } MigrateJob;
+
+static void migrate_fiber(Cpu *c) {
+    MigrateJob *j = arg_p(c, 0);
+    int *d = kern_host_depth(c->thread);
+    j->f_on_a = c->thread == j->a && *d == 1;   // new fibers start at 0; this host function counts one
+    __atomic_store_n(d, *d + DEPTH_F, __ATOMIC_RELAXED);
+    rt_call(c, a_fib_switch, 1, (uint64_t)0);
+    d = kern_host_depth(c->thread);             // resumed on B
+    j->f_on_b = c->thread == j->b && *d == 1 + DEPTH_F;
+    __atomic_store_n(d, *d - DEPTH_F, __ATOMIC_RELAXED);
+    ret_x(c, 0);                                // back to the context of the thread now running: B's
+}
+
+static void migrate_a(Cpu *c) {
+    MigrateJob *j = arg_p(c, 0);
+    j->a = c->thread;
+    rt_call(c, a_fib_init, 6, j->fiber, a_migrate_fiber, ga(j), j->stack, (uint64_t)STACK, (uint64_t)0);
+    int *d = kern_host_depth(c->thread);
+    __atomic_store_n(d, DEPTH_A, __ATOMIC_RELAXED);
+    rt_call(c, a_fib_switch, 1, j->fiber);
+    j->a_after = *d;
+    j->stage = 1;
+    while (j->stage != 2) sleep_ms(c, 1);       // B resumes F meanwhile: each sleep's SVC counts on A and comes back
+    j->a_kept = *d == DEPTH_A;
+    __atomic_store_n(d, 0, __ATOMIC_RELAXED);
+    exit_thread(c);
+}
+
+static void migrate_b(Cpu *c) {
+    MigrateJob *j = arg_p(c, 0);
+    while (j->stage != 1) sleep_ms(c, 1);
+    j->b = c->thread;
+    int *d = kern_host_depth(c->thread);
+    __atomic_store_n(d, DEPTH_B, __ATOMIC_RELAXED);
+    rt_call(c, a_fib_switch, 1, j->fiber);
+    j->b_after = *d;
+    __atomic_store_n(d, 0, __ATOMIC_RELAXED);
+    j->stage = 2;
+    exit_thread(c);
+}
+
+static void test_fiber_migrate(Cpu *c) {
+    MigrateJob j = {.fiber = ga(mem_kernel_alloc(0x100, 16)), .stack = ga(mem_kernel_alloc(STACK, 16))};
+    int track = kern_host_track;
+    kern_host_track = 1;   // no guest thread runs here but the two below, and this one in sleeps: balanced throughout
+    uint32_t ha = create(c, a_migrate_a, &j, 44, -2), hb = create(c, a_migrate_b, &j, 44, -2);
+    start(c, ha);
+    start(c, hb);
+    join(c, ha);
+    join(c, hb);
+    kern_host_track = track;
+    rt_call(c, a_fib_fin, 1, j.fiber);
+    int ok = j.f_on_a && j.f_on_b && j.a_after == DEPTH_A && j.b_after == DEPTH_B && j.a_kept;
+    printf("fiber resumed on another thread: host depth on A %d (kept %d), on B %d, in the fiber on A %d, on B %d: %s\n",
+           j.a_after, j.a_kept, j.b_after, j.f_on_a, j.f_on_b, ok ? "ok" : "FAIL");
+    CHECK(ok, "host depth across a fiber migration");
+}
+
 // ---- ExitThread unwinding: from three nested host calls deep, and from a fiber
 typedef struct { int stage, depth, bad; uint64_t fiber, stack; } ExitJob;
 
@@ -690,6 +757,7 @@ static void probe_main(Cpu *c) {
     test_cores(c);
     test_core_target(c);
     test_fibers(c);
+    test_fiber_migrate(c);
     test_exit(c);
     test_lifted_ticks(c);
     test_exit_process(c);
@@ -765,6 +833,9 @@ int probe_kernel(void) {
     a_fiber_fn = hostfn_register("probe-kernel fiber", fiber_fn);
     a_fiber_exit_thread = hostfn_register("probe-kernel fiber exit thread", fiber_exit_thread);
     a_fiber_exit_fn = hostfn_register("probe-kernel fiber exit", fiber_exit_fn);
+    a_migrate_a = hostfn_register("probe-kernel fiber migrate a", migrate_a);
+    a_migrate_b = hostfn_register("probe-kernel fiber migrate b", migrate_b);
+    a_migrate_fiber = hostfn_register("probe-kernel fiber migrate fiber", migrate_fiber);
     a_tick_worker = hostfn_register("probe-kernel tick worker", tick_worker);
     a_fib_init = hostfn_register(KERN_SYM_INITIALIZE_FIBER, kern_fiber_initialize);   // the loader's addresses
     a_fib_fin = hostfn_register(KERN_SYM_FINALIZE_FIBER, kern_fiber_finalize);
