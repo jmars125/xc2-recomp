@@ -80,7 +80,7 @@
  "ui.version": "version {version}",
  "ui.intro": "Builds a playable Xenoblade Chronicles 2 folder from your own game files. This takes a while and runs once.",
  "ui.notice": "The folder this setup builds contains the game. It is for your own use only; do not share or upload it.",
- "ui.keys_private": "The keys file is read in place. Its contents are never shown, copied or stored.",
+ "ui.keys_private": "The keys file is read in place and its contents are never shown. While the setup runs, a private temporary folder holds the keys the decryption tool needs; it is deleted when the tool finishes or, after a crash, on the next run.",
  "ui.base": "Base game (NSP or XCI)",
  "ui.update": "Update 3.0.1 (NSP)",
  "ui.dlc": "Add-on content (NSP files, optional)",

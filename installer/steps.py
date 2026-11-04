@@ -8,7 +8,7 @@ with the bundled clang (hostcheck.c).
 Install folder: exefs/, romfs/ (romfs.bin, index.json), aoc/<index>/ (the add-on content's RomFS), profile/, xc2.exe
 and its DLLs, romfs-index.bin, xc2_xlate.exe, shader-prepared.bin, shader-cache/, xc2.ini, xc2-install.json.
 Temp folder (<temp>/<dest name>-<hash>): check/ (ExeFS of both inputs, the host check), gen/ (C), build/ (objects),
-logs/ (kept by the cleanup).
+keys/ (private folders of the key files hactool reads while it runs), logs/ (kept by the cleanup).
 """
 import hashlib
 import json
@@ -37,6 +37,7 @@ DEST_EXTRA = 4 * GiB      # beside the RomFS: shader and pipeline caches (about 
 TEMP_NEED = 3 * GiB       # generated C (about 0.9 GB) and objects
 HOSTCHECK = Path(__file__).resolve().parent / 'hostcheck.c'
 STAMP = '.install-key'
+KEYS_FOLDER = 'keys'   # in the temp folder: tools/extract.py private_keys_folder makes one folder per hactool job there
 PATCHES = 'patches-upd.txt'   # recomp/: code patch sets of 3.0.1 (recomp/patches.py)
 XLATE = 'xc2_xlate' + EXE   # the translator's name beside xc2.exe; runtime/gfx_shader.c starts it by this name
 
@@ -90,6 +91,17 @@ def replace_file(src, dst):
     tmp = dst.with_name(dst.name + '.tmp')
     shutil.copy2(src, tmp)
     os.replace(tmp, dst)
+
+
+def remove_stale_keys(ctx):
+    """Delete the key files a killed or powered-off run left behind: the private folders of the temp folder, and those of
+    older releases, which kept them beside the NCA copies. Runs first, whatever the rest of the setup then decides."""
+    stale = [ctx.temp / KEYS_FOLDER, *ctx.temp.glob('dlc/*.keys'), *ctx.dest.glob('update-merge-*/*.keys')]
+    for path in stale:
+        try:
+            remove(path)
+        except OSError as e:
+            ctx.reporter.log(f'could not remove old key files in {path}: {type(e).__name__}')
 
 
 def kill_tree(proc):
@@ -227,6 +239,7 @@ class Check(Step):
 
     def run(self, ctx):
         layout, rep, dest = ctx.layout, ctx.reporter, ctx.dest
+        remove_stale_keys(ctx)
         missing = layout.missing()
         if missing:
             raise InstallError('check.release_incomplete', paths=missing[:5])
@@ -488,7 +501,7 @@ class Extract(Step):
         ctx.save()
 
         dest.mkdir(parents=True, exist_ok=True)
-        for stale in dest.glob('update-merge-*'):   # a killed merge leaves its NCA copies (and key copies) behind
+        for stale in dest.glob('update-merge-*'):   # a killed merge leaves its NCA copies behind
             remove(stale)
         rep.progress('extract', 'exefs', force=True)
         staged = ctx.temp / 'check' / 'update' / 'exefs'
@@ -538,7 +551,8 @@ class Extract(Step):
 
         watch.start()
         try:
-            extract.merge_update_romfs(base, update, keys, ctx.layout.hactool, romfs, logs, phase=phase)
+            extract.merge_update_romfs(base, update, keys, ctx.layout.hactool, romfs, logs, phase=phase,
+                                       key_root=ctx.temp / KEYS_FOLDER)
         except extract.DamagedFile as e:
             raise InstallError('check.input_damaged', input='base' if e.path == base else 'update', path=str(e.path),
                                detail=e.detail) from None
@@ -608,10 +622,10 @@ class Dlc(Step):
         work = ctx.temp / 'dlc'
         remove(work)
         work.mkdir(parents=True)
-        hactool_keys, title_keys = work / 'hactool.keys', work / 'title.keys'
-        hactool_prod_keys(keys_path, hactool_keys)
         indices = []
-        try:
+        with extract.private_keys_folder(ctx.temp / KEYS_FOLDER) as secret:
+            hactool_keys, title_keys = secret / 'hactool.keys', secret / 'title.keys'
+            hactool_prod_keys(keys_path, hactool_keys)
             for n, path in enumerate(files):
                 rep.progress('dlc', 'extract', n, len(files), 'files')
                 with path.open('rb') as f:
@@ -634,9 +648,6 @@ class Dlc(Step):
                     raise InstallError('dlc.extract_failed', path=str(path), log=str(ctx.temp / 'logs' / f'dlc-{index}.log'))
                 rep.log(f'dlc: {path.name} is add-on content {index} ({title_id})')
                 indices.append(index)
-        finally:
-            remove(hactool_keys)
-            remove(title_keys)
         rep.progress('dlc', 'extract', len(files), len(files), 'files')
         return {'indices': sorted(set(indices))}
 
@@ -806,7 +817,7 @@ class Cleanup(Step):
         rep.progress('cleanup', 'temp', force=True)
         for stale in dest.glob('update-merge-*'):
             remove(stale)
-        for name in ('gen', 'build', 'check', 'dlc'):
+        for name in ('gen', 'build', 'check', 'dlc', KEYS_FOLDER):
             remove(ctx.temp / name)
         return {}
 
