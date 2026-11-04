@@ -106,7 +106,7 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   3440x1440 with `XC2_OUTPUT_RES=3440x1440`: the 3D view must show more at the sides, not a stretched 16:9. Which of
   the three sites is the field camera and which the menus or the map is not known; run 2.1.0 first, where the mods'
   sites are the check. `render_scale` has no effect (the scene sites are not found); the menu row says so.
-  The interface (2026-11-04, read in the 1.0.0 disassembly, `tools/ui_sites_xc2.py`; not yet run in the game).
+  The interface (2026-11-04, read in the 1.0.0 disassembly, `tools/ui_sites_xc2.py`; run at 3840x1080 on the title screen, where "Press any button" sits at 50% of the width and "Ver. 3.0.1" at 72%; menus past the difficulty dialog not run).
   `layer::LayerShdManager::beginShader` takes the render size from the draw info (+0x550 / +0x554) and computes one
   scale, min(width / 1280, height / 720) (+0x558), and the uniform factors `x_ndc = x * 2 * scale - 1`, with x kept as
   canvas pixel / screen width; the viewport covers the target from (0, 0). So at 3840x1080 canvas x falls on pixel
@@ -132,8 +132,8 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   Inferred, not measured: which menus use filters, and whether draw info +0x150 is the camera's projection (its
   product with +0x110 is what `createWorldMatrixUniform` multiplies, and the layer's own perspective in the same
   function follows +0x110, so +0x110 is the view).
-- Render memory at large output sizes (2026-11-04; `tools/size_sites_xc2.py`, read in the disassembly of 1.0.0 and 3.0.1,
-  not yet run in the game). What limits GLIBPXL, from the outside in: the application pool (`memory.c` `DEFAULT_POOL`,
+- Render memory at large output sizes (2026-11-04; `tools/size_sites_xc2.py`, read in the disassembly of 1.0.0 and 3.0.1;
+  run to the title screen and the opening at 1920x1080, 3840x1080, 5120x1440 and 7680x2160 with no abort). What limits GLIBPXL, from the outside in: the application pool (`memory.c` `DEFAULT_POOL`,
   grown by `res_heap_extra_bytes`); the heap (`HEAP_CAP`, was 4 GiB, now 8 GiB in a 9 GiB `LOW_SIZE` block: nothing in the
   guest holds the heap in 32 bits, `nninitStartup` and `mtl::MemManager::create` take u64); the graphic region, which
   nothing grew before: `nnMain` writes three region sizes into `ml::WorkRootParam` (product 0x8c400000, debug 0xd800000,
@@ -142,7 +142,7 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   loads that size from page +0x80. Last, the u32 sum of `grlib::CGLibMemHandle::setup`, hence `RES_BUDGET_MAX` 3584 MiB.
   The abort handler: `nn::ro::detail::GetExceptionInfo` reads 4 bytes past a module's image, so `loader.c load_module`
   commits a zero page after each one, to let the game's own abort message through.
-- The centred rectangle at wide render sizes (2026-11-04; open). At 3840x1080 many cutscenes show a hard-edged rectangle
+- The centred rectangle at wide render sizes (2026-11-04; open, and still there with the render target table laid out for the render size: single frames of the opening at 3840x1080 show the same edges at world seconds 48 to 52.5). At 3840x1080 many cutscenes show a hard-edged rectangle
   x 1280..2560, y 177..902 (1280x720 centred, the frames' edges measured in `build/series-4k`) and one x 1024..2816,
   y 32..1046 (the same with 256 and 144 pixels more on each side, a factor of 1.4): inside the inner one the picture is
   brighter, between them darker, with the rain drawn over all. Both stay fixed for the 50 frames of the flash. What was
@@ -158,7 +158,7 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   Found on the way, and fixed in the set size: `setupMemBuff` lays out the byte offsets of all post-process targets from
   the 1280x720 canvas while the targets take the render size, so past 720p they overlap in memory, and the Vulkan back end
   binds them at those offsets (`vk_texture.c`). This is the likeliest meaning of emoose's remark that a larger size
-  breaks some cutscene effects in the emulators, and it may or may not be the rectangle. Running 1.0.0's `setupMemBuff` in
+  breaks some cutscene effects in the emulators; it is not the rectangle, which stays with the targets apart. Running 1.0.0's `setupMemBuff` in
   Unicorn with the size calls stubbed at 4 bytes per pixel: 141 targets, 336 MiB at 1280x720, 94 of them with a size
   from the canvas. So GLIBPXL is budgeted as 362 MiB times pixels over 1280x720 (`resolution.c decide`): 3840x1080
   takes 1629 MiB and a 4.5 GiB application pool, 5120x1440 2896 MiB, and 7680x2160 needs 6516 MiB, past the 3584 MiB
