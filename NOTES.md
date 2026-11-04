@@ -51,10 +51,24 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
 ## Known gaps
 
 - Transform feedback is not replayed (`nvn_api_cmd.c xfb_skipped`).
-- The patch table holds only the 60 fps set (below); the game keeps its own resolution. Comments that say XC2 in `frame_rate.c`,
-  `resolution.c` and the `UI_*` sites of `nvn_api_cmd.c` describe XCX addresses (the rename went XCX -> XC3 -> XC2); those
-  paths are inert until the sites are found in XC2's `main`: neither 3.0.1 nor 2.1.0 holds the `{1920, 1080, 1280, 720}`
-  table, and the `xc360` set that gates every XCX address write in `frame_rate.c` does not exist for XC2.
+- Resolution and ultrawide (2026-11-03). The game keeps its own picture size: neither 3.0.1 nor 2.1.0 holds the
+  `{1920, 1080, 1280, 720}` table XC3's `resolution.c` wrote, and the XCX-address interface fit of `nvn_api_cmd.c` is
+  gone with it (in the history). What `output_res` does now is shape the 3D view: `tools/aspect_sites_xc2.py` finds the
+  loads of the f32 constants 16/9 (`0x3fe38e39`) and 9/16 (`0x3f100000`) in `main` (adrp + `ldr s`, and movz/movk +
+  `fmov s, w`) and emits the set `aspect`, whose sites read patch page +0x60 and +0x64; `resolution.c res_init` stores
+  the output's aspect and its inverse there and switches the set on for a shape other than 16:9, as `frame_rate.c
+  xc2_rate_store` does for the 1/30 loads of `xc360`. The 16:9 frame then holds the wider view, and the present fits
+  the frame at the output's shape (`gfx_present.c present_image`, `res_aspect_shape`), so `picture_fit = keep` shows
+  a 21:9 output whole on a 21:9 window. The interface is laid out on the 16:9 canvas and stretches with the picture.
+  Not done yet: the finder has not run on the real `main` (no game data on the machine the change was written on), so
+  `patches-upd.txt` has no `aspect` set and `res_init` logs that; its `--selftest` covers the encodings on a synthetic
+  image. To finish: `fps_sites_xc2.py main > patches-upd.txt`, `aspect_sites_xc2.py main >> patches-upd.txt`
+  (its stderr names each site's function and the loads it could not patch: `ldr s, <literal>` and the `fmov s, #0.5625`
+  immediate have no address register at the site), `gen.py --patches`, build, and a run at 3440x1440 with
+  `XC2_OUTPUT_RES=3440x1440`: the 3D view must show more at the sides, not a stretched 16:9. Then the interface: the
+  finder's INFO lines list where 1280/720 and 1920/1080 are used together, the candidates for the canvas size. The
+  2.1.0 build needs the finder's version gate extended (`LANDMARKS`) or `--no-gate`. `render_scale` has no effect
+  (the scene sites are not found); the menu row says so.
 - 60 fps, 3.0.1 (2026-11-02; on by default, `XC2_FPS_LIMIT=30` or `XC2_FPS60=0` for the shipping 30):
   - Frame pacing is a spin in the main thread, main+0x6aafd8: it reads the system tick until the time since the frame
     began exceeds period * interval * 0.997 (constant main+0x9b558c). The period comes from virtual +0xd0 of the object

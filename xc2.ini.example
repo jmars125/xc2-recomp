@@ -115,19 +115,24 @@
 # Which GPU to use: its index in the log, or part of its name. Default: the first discrete GPU with Vulkan 1.3.
 # gpu_index = 0
 # gpu_name = NVIDIA
-# Game resolution: the size the game draws its picture and interface in (1280x720 to 7680x4320). Above 1920x1080 the
-# game's texture heap and memory pool grow with it. Read at start.
-# output_res = 1920x1080
-# 3D render scale: the scene's size relative to the game resolution: game (its dynamic resolution) or a fixed
-# percentage from 25 to 100; a higher one counts as 100. For supersampling, set output_res above window_size. Read at
+# Output shape: <width>x<height> (640x360 to 7680x4320). XC2 draws its picture at its own size; only the shape counts.
+# A shape other than 16:9 (3440x1440 for 21:9) lays the 3D view out for it when this build has the aspect patch set
+# (tools/aspect_sites_xc2.py), and the present shows the picture at that shape; the interface stays laid out for 16:9
+# and is stretched with the picture. Without the set the picture stays 16:9 and picture_fit decides the bars. Read at
 # start.
+# output_res = 1920x1080
+# The aspect patch set: 1 (default) widens the 3D view for an output_res of another shape, 0 keeps it 16:9 with the
+# bars of picture_fit. Read at start.
+# aspect = 1
+# 3D render scale: not in effect for XC2 yet, the game keeps its own dynamic resolution (the code that sets it is not
+# found). game, or a percentage from 25 to 100 once it is. Read at start.
 # render_scale = game
 # Scaling to the window when it is larger than the game resolution: fsr (AMD FSR 1) or bilinear, and FSR's sharpening
 # from 0 (off) to 100. Changes while the game runs take effect at once.
 # upscaler = fsr
 # sharpness = 80
-# Picture shape when the window's differs from the game resolution's (a 16:9 game on a 16:10 screen): keep (its
-# proportions, with black bars) or stretch (over the whole window). Changes take effect at once.
+# Picture shape when the window's differs from the output's (a 16:9 picture on a 16:10 screen, or output_res 21:9 in a
+# 16:9 window): keep (its proportions, with black bars) or stretch (over the whole window). Changes take effect at once.
 # picture_fit = keep
 
 [language]

@@ -51,13 +51,13 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_PERF_LINE_FPS] = "%.0f fps",
     [UI_MENU_GRAPHICS] = "Picture",
     [UI_MENU_OUTPUT_RES] = "Game resolution",
-    [UI_MENU_OUTPUT_RES_DESC] = "The size the game draws its picture and interface in. Above 1920 x 1080 the game needs "
-                                "more video memory and GPU time.",
+    [UI_MENU_OUTPUT_RES_DESC] = "The shape the picture is shown in. XC2 draws at its own size; a shape other than 16:9 "
+                                "(3440 x 1440) widens the 3D view when this build has the aspect patch set, and the "
+                                "interface is stretched with the picture. Takes effect after a restart.",
     [UI_MENU_RENDER_SCALE] = "3D render scale",
-    [UI_MENU_RENDER_SCALE_DESC] = "Size of the 3D scene relative to the game resolution; the game's FSR scales it to "
-                                  "that size. Game leaves it to the game's dynamic resolution; a percentage fixes it. "
-                                  "For supersampling, set the game resolution above the window's. Takes effect after "
-                                  "a restart.",
+    [UI_MENU_RENDER_SCALE_DESC] = "Not in effect for XC2 yet: the game keeps its own dynamic resolution, as the code "
+                                  "that sets it is not found. Game leaves it to the game; a percentage will fix it "
+                                  "once that code is found. Takes effect after a restart.",
     [UI_MENU_RENDER_SCALE_GAME] = "Game (dynamic)",
     [UI_MENU_UPSCALER] = "Scaling to the window",
     [UI_MENU_UPSCALER_DESC] = "How the picture is scaled when the window is larger than the game resolution. FSR keeps "
@@ -285,13 +285,13 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_PERF_LINE_FPS] = "%.0f к/с",
     [UI_MENU_GRAPHICS] = "Изображение",
     [UI_MENU_OUTPUT_RES] = "Разрешение игры",
-    [UI_MENU_OUTPUT_RES_DESC] = "Размер, в котором игра рисует картинку и интерфейс. Выше 1920 × 1080 игре нужно больше "
-                                "видеопамяти и времени GPU.",
+    [UI_MENU_OUTPUT_RES_DESC] = "Форма, в которой показывается картинка. XC2 рисует в своём размере; форма, отличная от "
+                                "16:9 (3440 × 1440), расширяет 3D-обзор, если в этой сборке есть набор патчей aspect, а "
+                                "интерфейс растягивается вместе с картинкой. Применяется после перезапуска.",
     [UI_MENU_RENDER_SCALE] = "Масштаб 3D-отрисовки",
-    [UI_MENU_RENDER_SCALE_DESC] = "Размер 3D-сцены относительно разрешения игры; FSR игры доводит её до этого размера. "
-                                  "«Как в игре» оставляет его динамическому разрешению игры; процент фиксирует его. "
-                                  "Для суперсэмплинга задайте разрешение игры выше разрешения окна. Применяется после "
-                                  "перезапуска.",
+    [UI_MENU_RENDER_SCALE_DESC] = "Пока не действует для XC2: игра сохраняет своё динамическое разрешение, так как код, "
+                                  "который его задаёт, не найден. «Как в игре» оставляет его игре; процент зафиксирует "
+                                  "его, когда этот код будет найден. Применяется после перезапуска.",
     [UI_MENU_RENDER_SCALE_GAME] = "Как в игре (динамически)",
     [UI_MENU_UPSCALER] = "Масштабирование под окно",
     [UI_MENU_UPSCALER_DESC] = "Как картинка растягивается, когда окно больше разрешения игры. FSR сохраняет края и "

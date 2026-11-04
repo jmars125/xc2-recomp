@@ -21,7 +21,7 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 - XC2-Setup: builds the game from your own NSP files and `prod.keys`
 - In-game settings menu (F1) and performance overlay (F10)
 - Keyboard, mouse and gamepad
-- Any game resolution and aspect ratio, including ultrawide (`output_res` in `xc2.ini`)
+- Any window size and shape: the picture keeps its 16:9 proportions with bars or stretches (`picture_fit` in `xc2.ini`); a 3D view laid out for an ultrawide screen (`output_res`) is in progress and needs a patch set generated from the game ([NOTES.md](NOTES.md), "Known gaps")
 
 ## Planned
 

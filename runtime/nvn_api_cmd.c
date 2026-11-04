@@ -12,7 +12,6 @@
 // recording into host memory; the handle is that copy (a flat OP_BEGIN ... OP_END sequence) and lives until the game
 // adds the same control memory again. CallCommands and CopyCommands inline the called recording, so copies hold no
 // OP_CALL or OP_JUMP.
-#include <math.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -466,8 +465,6 @@ NVN_API(nvnCommandBufferUpdateUniformBuffer) {
     memcpy(r->data, data, n);
 }
 
-static void ui_note_target(const tex_t *t);
-static void ui_rect(const Cpu *c, float *x, float *w, int viewport);
 // ---------- CommandBuffer: render state, payloads of nvn_obj.h
 // void nvnCommandBufferSetRenderTargets(NVNcommandBuffer *cmd, int n, const NVNtexture *const *colors,
 // const NVNtextureView *const *color_views, const NVNtexture *depth, const NVNtextureView *depth_view)
@@ -487,7 +484,6 @@ NVN_API(nvnCommandBufferSetRenderTargets) {
         r->color[i] = ct ? tex_pin(ct[i]) : NULL;
         copy_view(&r->cview[i], &r->has_cview[i], cv ? cv[i] : NULL);
     }
-    ui_note_target(n > 0 ? r->color[0] : NULL);
     r->depth = tex_pin(dt);
     copy_view(&r->dview, &r->has_dview, dv);
 }
@@ -538,24 +534,17 @@ static void set_viewports(cmd_t *o, int first, int n, const float *v) {
 NVN_API(nvnCommandBufferSetViewports) {
     const float *v = arg_p(c, 3);
     int first = (int)arg_x(c, 1), n = (int)arg_x(c, 2);
-    if (first != 0 || n != 1) return set_viewports(cmd_of(c), first, n, v);
-    float one[4];   // the game's array stays as it is: it may set the same one again
-    memcpy(one, v, sizeof one);
-    ui_rect(c, &one[0], &one[2], 1);
-    set_viewports(cmd_of(c), 0, 1, one);
+    set_viewports(cmd_of(c), first, n, v);
 }
 // void nvnCommandBufferSetViewport(NVNcommandBuffer *cmd, int x, int y, int w, int h)
 NVN_API(nvnCommandBufferSetViewport) {
     float v[4] = {(float)(int)arg_x(c, 1), (float)(int)arg_x(c, 2), (float)(int)arg_x(c, 3), (float)(int)arg_x(c, 4)};
-    ui_rect(c, &v[0], &v[2], 1);
     set_viewports(cmd_of(c), 0, 1, v);
 }
 static void set_scissor(cmd_t *o, int x, int y, int w, int h) { *REC(o, OP_SCISSOR, p_scissor) = (p_scissor){x, y, w, h}; }
 // void nvnCommandBufferSetScissor(NVNcommandBuffer *cmd, int x, int y, int w, int h)
 NVN_API(nvnCommandBufferSetScissor) {
-    float x = (float)(int)arg_x(c, 1), w = (float)(int)arg_x(c, 3);
-    ui_rect(c, &x, &w, 0);
-    set_scissor(cmd_of(c), (int)x, (int)arg_x(c, 2), (int)w, (int)arg_x(c, 4));
+    set_scissor(cmd_of(c), (int)arg_x(c, 1), (int)arg_x(c, 2), (int)arg_x(c, 3), (int)arg_x(c, 4));
 }
 // void nvnCommandBufferSetScissors(NVNcommandBuffer *cmd, int first, int n, const int *xywh): the replay keeps one
 // scissor (index 0); other indices matter only to shaders that select a viewport index, so differing ones are reported
@@ -568,11 +557,7 @@ NVN_API(nvnCommandBufferSetScissors) {
             static int once;
             if (!once++) rt_log("nvn: SetScissors: differing scissor %d ignored (single-scissor replay)", first + i);
         }
-    if (first == 0 && n > 0) {
-        float x = (float)r[0], w = (float)r[2];
-        ui_rect(c, &x, &w, 0);
-        set_scissor(cmd_of(c), (int)x, r[1], (int)w, r[3]);
-    }
+    if (first == 0 && n > 0) set_scissor(cmd_of(c), r[0], r[1], r[2], r[3]);
 }
 static void set_depth_range(cmd_t *o, float n, float f) { *REC(o, OP_DEPTH_RANGE, p_depth_range) = (p_depth_range){n, f}; }
 // void nvnCommandBufferSetDepthRange(NVNcommandBuffer *cmd, float near, float far)
@@ -671,104 +656,12 @@ NVN_API(nvnCommandBufferBindVertexBuffer) {
     NVNbufferRange r = {arg_x(c, 2), arg_x(c, 3)};
     bind_vertex_buffers(cmd_of(c), (int)arg_x(c, 1), 1, &r);
 }
-// The game lays its interface out on a 16:9 canvas whatever the frame's shape: main+0xa2463c and its siblings turn each
-// element's transform into clip space with fixed scales, and on a wider frame that stretches the interface. Each
-// element's first uniform block holds the result as a 2x4 matrix (row 0 x, row 1 y) when main+0x95cd50 binds it, so a
-// frame wider than 16:9 narrows row 0 here, around the centre of the frame. Only binds to the output-sized target count:
-// the game also draws interface pieces into textures, and those keep their own shape. An element as wide as the canvas
-// (fades, dim layers) stays as it is, so that it still covers the frame.
-#define UI_BIND_LR (MOD_MAIN_BASE + 0x95ce04)
-#define UI_FULL_WIDTH 1.9f
-static _Thread_local int ui_on_output, ui_in_rect;
-
-static void ui_note_target(const tex_t *t) {
-    unsigned out[2], scene[2];
-    res_sizes(out, scene);
-    ui_on_output = t && t->d.width == out[0] && t->d.height == out[1];
-    ui_in_rect = 0;
-}
-
-// Whether the guest call chain runs through the interface renderer.
-static int ui_caller(const Cpu *c) {
-    if (c->x[30] - (MOD_MAIN_BASE + 0xa1c000) < 0x2c000) return 1;
-    uint64_t fp = c->x[29];
-    for (int i = 0; i < 6 && fp && !(fp & 7) && plat_mem_readable(fp, 16); i++) {
-        uint64_t next = *(uint64_t *)(uintptr_t)fp, ret = *(uint64_t *)(uintptr_t)(fp + 8);
-        if (ret - (MOD_MAIN_BASE + 0xa1c000) < 0x2c000) return 1;
-        if (next <= fp) break;
-        fp = next;
-    }
-    return 0;
-}
-
-// The game draws the interface as a list of top-level nodes (the loop returning to main+0xa434b4), and each piece of the
-// HUD or a menu hangs off one of them. A node's saved register in the frame below that loop tells them apart. A node that
-// stays on one side of the screen moves to that edge once narrowed; one that spans the centre, as world labels do, stays.
-#define UI_ROOT_LR (MOD_MAIN_BASE + 0xa434b4)
-#define UI_EDGE_SIDE 0.33f
-#define UI_LIST_LR (MOD_MAIN_BASE + 0xa3b8cc)   // a node reached through the parent's list: made at run time, world labels
-static uint64_t ui_node(const Cpu *c) {
-    uint64_t a = c->x[29], below = 0, lr = 0;
-    for (int d = 0; d < 16 && a && plat_mem_readable(a, 0x48); d++) {
-        const uint64_t *q = (const uint64_t *)(uintptr_t)a;
-        if (q[1] == UI_ROOT_LR) return lr == UI_LIST_LR ? 0 : below;
-        below = q[8], lr = q[1];
-        a = q[0];
-    }
-    return 0;
-}
-
-// What a node's elements add to their clip-space x once narrowed. The average of the element centres seen so far decides,
-// so that one stray wide element in a node on the right does not hold the rest back.
-static float ui_shift(uint64_t node, float lo, float hi, float k) {
-    static _Thread_local struct { uint64_t node; float sum, n; } seen[32];
-    static _Thread_local unsigned next;
-    if (!node) return 0;
-    int i = 0;
-    while (i < 32 && seen[i].node != node) i++;
-    if (i == 32) {
-        i = next++ % 32;
-        seen[i].node = node, seen[i].sum = 0, seen[i].n = 0;
-    }
-    seen[i].sum += (lo + hi) / 2, seen[i].n += 1;
-    float mid = seen[i].sum / seen[i].n;
-    return mid < -UI_EDGE_SIDE ? k - 1 : mid > UI_EDGE_SIDE ? 1 - k : 0;
-}
-
-// A viewport or scissor of the interface narrows like its elements. Elements inside a smaller viewport are placed in that
-// viewport's clip space, which is narrow already, so ui_fit leaves them.
-static void ui_rect(const Cpu *c, float *x, float *w, int viewport) {
-    float k = res_ui_fit();
-    if (k >= 1 || !ui_on_output) return;
-    unsigned out[2], scene[2];
-    res_sizes(out, scene);
-    if (*x <= 0 && *w >= (float)out[0]) {
-        if (viewport) ui_in_rect = 0;
-        return;
-    }
-    if (!ui_caller(c)) return;
-    float mid = out[0] / 2.0f, lo = *x / mid - 1, hi = (*x + *w) / mid - 1;
-    *x = mid + (*x - mid) * k + ui_shift(ui_node(c), lo, hi, k) * mid;
-    *w *= k;
-    if (viewport) ui_in_rect = 1;
-}
-
-static void ui_fit(const Cpu *c, int st, uint64_t addr, uint64_t size) {
-    static _Thread_local struct { uint64_t addr; float x; } done[64];
-    float k = res_ui_fit();
-    if (k >= 1 || !ui_on_output || ui_in_rect || st != 0 || c->x[30] != UI_BIND_LR || size < 0x80 || size > 0x400 ||
-        !plat_mem_readable(addr, 0x40))
-        return;
-    float *f = (float *)(uintptr_t)addr;
-    if (f[2] != 0 || f[6] != 0 || f[8] != 0 || f[9] != 0 || f[10] != 0 || f[11] != 0 || fabsf(f[0]) >= UI_FULL_WIDTH) return;
-    unsigned slot = (unsigned)(addr >> 4) % 64;   // a block bound for a second draw is narrow already
-    if (done[slot].addr == addr && done[slot].x == f[0]) return;
-    float a = f[3], b = f[3] + f[0], lo = a < b ? a : b, hi = a < b ? b : a;
-    if (hi - lo >= 1 && (lo <= -0.99f || hi >= 0.99f)) return;   // a shade laid over a whole side keeps its full reach
-    float shift = ui_shift(ui_node(c), lo, hi, k);
-    f[0] *= k, f[1] *= k, f[3] = f[3] * k + shift;
-    done[slot].addr = addr, done[slot].x = f[0];
-}
+// XCX's interface fit lived here (in the history: ui_note_target, ui_caller, ui_node, ui_shift, ui_rect, ui_fit). XCX
+// laid its interface out on a 16:9 canvas, and on a wider frame the fit narrowed each element's first uniform block (a
+// 2x4 transform bound by XCX's main+0x95cd50), and the interface's viewports and scissors, around the centre of the
+// output-sized target, telling the HUD's nodes apart by the return address of XCX's interface loop. Every address was
+// XCX's. XC2's interface sites are not found (tools/aspect_sites_xc2.py lists candidates as INFO), so on a wide output
+// XC2's interface is stretched with the picture (resolution.c res_ui_fit).
 
 // Uniform and storage buffers: one record per binding (CB_SIZE/ADDRESS 4 words + CB_BIND 1 on hardware).
 static void bind_buffers(const Cpu *c, uint32_t op) {   // (cmd, stage, first, n, const NVNbufferRange *ranges)
@@ -776,14 +669,12 @@ static void bind_buffers(const Cpu *c, uint32_t op) {   // (cmd, stage, first, n
     int st = (int)arg_x(c, 1), first = (int)arg_x(c, 2), n = (int)arg_x(c, 3);
     const NVNbufferRange *rg = arg_p(c, 4);
     for (int i = 0; i < n; i++) {
-        if (op == OP_BIND_UBO && first + i == 0) ui_fit(c, st, rg[i].address, rg[i].size);
         *REC(o, op, p_bind_buf) = (p_bind_buf){st, first + i, rg[i].address, rg[i].size};
         hw_fix(o, 20);
     }
 }
 static void bind_buffer(const Cpu *c, uint32_t op) {    // (cmd, stage, index, NVNbufferAddress address, size_t size)
     cmd_t *o = cmd_of(c);
-    if (op == OP_BIND_UBO && arg_x(c, 2) == 0) ui_fit(c, (int)arg_x(c, 1), arg_x(c, 3), arg_x(c, 4));
     *REC(o, op, p_bind_buf) = (p_bind_buf){(int)arg_x(c, 1), (int)arg_x(c, 2), arg_x(c, 3), arg_x(c, 4)};
     hw_fix(o, 20);
 }

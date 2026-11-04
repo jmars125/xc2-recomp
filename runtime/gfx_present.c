@@ -585,7 +585,10 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
                  VK_PIPELINE_STAGE_2_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
     const int rect[4] = {cx, cy, cw, ch};
     int to[4];   // where the picture goes in the swapchain image: {x, y, w, h}
-    gfx_fit_rect(cw, ch, (int)g_sc_ext.width, (int)g_sc_ext.height, to);
+    unsigned shape[2];   // the set aspect: the 16:9 frame holds a view laid out for the output's shape (resolution.c)
+    int fw = cw, fh = ch;
+    if (res_aspect_shape(shape)) fw = (int)shape[0], fh = (int)shape[1];
+    gfx_fit_rect(fw, fh, (int)g_sc_ext.width, (int)g_sc_ext.height, to);
     if (to[2] != (int)g_sc_ext.width || to[3] != (int)g_sc_ext.height) {   // black bars beside or above and below it
         VkClearColorValue black = {.float32 = {0, 0, 0, 1}};
         VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
