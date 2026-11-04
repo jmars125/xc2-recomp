@@ -117,8 +117,8 @@
 # gpu_name = NVIDIA
 # Render size: <width>x<height> (640x360 to 7680x4320). The game draws its picture at this size when this build has the
 # size patch set (tools/size_sites_xc2.py): the game's own 1280x720 window textures become it, so 3840x2160 is a native
-# 4K picture and 7680x2160 a native 32:9 one. Past 3840x1080 the game's memory budget for its render targets grows with
-# the pixels, and so does the memory the game is given (up to 4 GiB in all). A shape other than 16:9 (3440x1440 for
+# 4K picture and 7680x2160 a native 32:9 one. Past 1920x1080 the game's memory budget for its render targets grows with
+# the pixels, and so does the memory the game is given. A shape other than 16:9 (3440x1440 for
 # 21:9) also lays the 3D view out for it when the build has the aspect patch set (tools/aspect_sites_xc2.py); the
 # interface stays laid out for 16:9 and is centred in the picture when the build has the ui patch set
 # (tools/ui_sites_xc2.py). Without the sets the picture stays 1280x720 at 16:9 and picture_fit decides the bars. Read at start.

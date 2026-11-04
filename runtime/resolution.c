@@ -19,7 +19,7 @@
 //           process targets take the render size, but ml::DrPixlMemMan::setupMemBuff lays out their offsets in that
 //           memory from the 1280x720 canvas, so past 1280x720 they overlap, and the back end binds them onto the pool
 //           at those offsets: they really share memory. The set's last two sites give setupMemBuff the render size
-//           from +0x84 / +0x88 in place of the canvas's, and GLIBPXL is budgeted for what it then lays out.
+//           from +0x84 / +0x88 in place of the canvas's, past 1920x1080, and GLIBPXL is budgeted for what it then lays out.
 //   scale   The game's dynamic resolution (lib_nx.ini red_sclX / red_sclY / red_Auto) ends in
 //           ml::DrPixlPostParm::isReductionBuffer, which multiplies the scale pair by 100.0 and draws the scene at
 //           width * percent / 100. The set loads both percents from +0x70, where res_init stores 100 when the set
@@ -70,6 +70,8 @@
 #define PAGE_TABLE_W 0x84   // u32 size the render target table is laid out for (the set size's last two sites)
 #define PAGE_TABLE_H 0x88
 #define GRAPHIC_REGION 0x20000000ull    // nnMain's ml::WorkRootParam: the parent region of GLIBTOP
+#define PXL_SHIPPED_PIXELS (1920ull * 1080)  // up to this the pool, the budget and the table's layout stay the game's
+#define PXL_BYTES_PER_PIXEL 253ull  // the end of GLIBPXL's textures per output pixel: 597 MiB at 1920x1080, 1096 at 3840x1080, 1818 at 5120x1440 (measured)
 #define ASPECT_EPS 0.005f   // 1366x768 counts as 16:9; 16:10 and 21:9 do not
 
 static struct {
@@ -106,16 +108,19 @@ static void decide(void) {
         rt_log("resolution: XC2_OUTPUT_RES=%s is not <width>x<height> in 640x360..7680x4320; 1920x1080", o);
     }
     uint64_t pixels = (uint64_t)R.ow * R.oh;
+    // Up to the shipped 1920x1080 the application pool stays the game's: the budget stays 362 MiB and the table its 1280x720
+    // layout, whose targets then share memory where they grow past their slots. Above that the budget holds the table as
+    // laid out for the output: PXL_BYTES_PER_PIXEL over the 1280x720 that 362 MiB holds, in 2 MiB steps.
     R.budget = PXL_BUDGET;
-    R.tw = R.ow, R.th = R.oh;
-    // Nearly all of GLIBPXL at 1280x720 is the target table and the window textures, which grow with the pixels: the
-    // budget in the same proportion, whole MiB.
-    if (pixels > GAME_W * GAME_H)
-        R.budget = (PXL_BUDGET * pixels / (GAME_W * GAME_H) + (1u << 20) - 1) & ~((1ull << 20) - 1);
+    R.tw = GAME_W, R.th = GAME_H;
+    if (pixels > PXL_SHIPPED_PIXELS) {
+        R.tw = R.ow, R.th = R.oh;
+        R.budget = (PXL_BUDGET + (pixels - GAME_W * GAME_H) * PXL_BYTES_PER_PIXEL + (2u << 20) - 1) & ~((2ull << 20) - 1);
+    }
     if (R.budget > RES_BUDGET_MAX) {
         // Past this the u32 sums of grlib::CGLibMemHandle::setup would wrap. The table is laid out for a smaller size of
         // the same shape that fits: its targets overlap again, the less the nearer the output is to the limit.
-        double fit = sqrt((double)RES_BUDGET_MAX / (double)R.budget);
+        double fit = sqrt((double)(GAME_W * GAME_H + (RES_BUDGET_MAX - PXL_BUDGET) / PXL_BYTES_PER_PIXEL) / (double)pixels);
         R.tw = (unsigned)(R.ow * fit) & ~1u, R.th = (unsigned)(R.oh * fit) & ~1u;
         rt_log("resolution: %ux%u needs a pixel memory budget of %llu MiB; it stops at %llu MiB, the most the game's "
                "32-bit region sizes hold. The render target table is laid out for %ux%u: past that size its targets "
@@ -211,6 +216,9 @@ void res_init(void) {
         if (on) {
             R.rw = R.ow, R.rh = R.oh;
             rt_log("resolution: render size %ux%u (the display's window textures, set size)", R.rw, R.rh);
+            if (R.budget == PXL_BUDGET && (R.ow > GAME_W || R.oh > GAME_H))
+                rt_log("resolution: pixel memory budget %llu MiB, the game's: the render target table stays laid out for "
+                       "%ux%u, so targets past their slots share memory", (unsigned long long)(R.budget >> 20), GAME_W, GAME_H);
             if (R.budget != PXL_BUDGET)
                 rt_log("resolution: pixel memory budget %llu MiB (the game's %llu MiB holds %ux%u); the application pool "
                        "and the graphic region grow by %llu MiB", (unsigned long long)(R.budget >> 20),
