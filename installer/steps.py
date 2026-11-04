@@ -291,9 +291,14 @@ class Check(Step):
         devices = host['devices']
         if not devices:
             raise InstallError('check.vulkan_no_device')
-        if not any(tuple(d['api'][:2]) >= (1, 3) for d in devices):
+        recent = [d for d in devices if tuple(d['api'][:2]) >= (1, 3)]
+        if not recent:
             raise InstallError('check.vulkan_too_old',
                                devices=', '.join(f'{d["name"]} ({d["api"][0]}.{d["api"][1]})' for d in devices))
+        # runtime/vk_device.c pick_device skips a device lacking one of these, so the game would start with none
+        if all(d['missing'] for d in recent):
+            raise InstallError('check.vulkan_no_extension',
+                               devices='; '.join(f'{d["name"]} ({", ".join(d["missing"])})' for d in recent))
         kernel = linux_kernel()
         if kernel and kernel < (6, 7):
             # Without userfaultfd's asynchronous write protection nothing tracks the CPU's writes: the game copies whole
