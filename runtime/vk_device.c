@@ -21,7 +21,9 @@ static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBi
     int err = (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0;
     if (err) plat_inc32(&g_vk.validation_errors);
     static volatile int32_t logged;
-    if (plat_inc32(&logged) <= 500) rt_log("vk validation %s: %s", err ? "error" : "warning", d->pMessage);
+    // The VUID comes separately: recent layers leave it out of pMessage, and a log search needs it.
+    if (plat_inc32(&logged) <= 500)
+        rt_log("vk validation %s: [%s] %s", err ? "error" : "warning", d->pMessageIdName ? d->pMessageIdName : "", d->pMessage);
     return VK_FALSE;
 }
 
