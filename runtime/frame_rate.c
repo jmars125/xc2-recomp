@@ -136,6 +136,17 @@ int frame_rate_paced(void) { return xc2_words != NULL; }
 // 2.0.2 and 2.1.0 "60 FPS + Cutscenes Speed Fix" cheat reads it at main+0xbd4380 (3.0.1 moved that bss by 0x1000;
 // the same 17 sites write it) to put the interval back to 2 and the step to 1/30. XC2_CUTSCENE_30=0 keeps the limit
 // in cutscenes; XC2_CUTSCENE_30=mixed keeps it in event scenes and runs 30 fps in movies only.
+// Heart-to-hearts are in-engine talks without that cutscene flag; while one plays, the scene name at main+0xb95df0
+// (3.0.1, "default" in the field; found in Aegis, aegis-xc2 runtime/hle/xc2.c scene_on) is "kizunatalk<n>", and it
+// counts as an event scene too. At 30 fps the step is 1/30 s as on the console, so holding one is right either way.
+static int xc2_scene_talk(void) {
+    char name[16] = {0};
+    if (!plat_mem_read(MOD_MAIN_BASE + 0xb95df0, name, sizeof name - 1)) return 0;
+    static char last[16];
+    if (strcmp(name, last)) rt_log("frame rate: scene \"%s\"", name), memcpy(last, name, sizeof last);
+    return !strncmp(name, "kizunatalk", 10);
+}
+
 static int xc2_cutscene(void) {
     static int mode = -1;   // 0 off, 1 every cutscene, 2 mixed
     if (mode < 0) {
@@ -148,7 +159,8 @@ static int xc2_cutscene(void) {
     if (!plat_mem_read(MOD_MAIN_BASE + 0xbd5380, &state, 4)) return 0;
     static uint32_t last = 0;
     if (state != last) rt_log("frame rate: event state %u -> %u", last, state), last = state;
-    return mode == 1 && state != 0;
+    int talk = xc2_scene_talk();
+    return mode == 1 && (state != 0 || talk);
 }
 
 void frame_step_init(void) {
