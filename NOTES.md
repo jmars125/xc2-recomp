@@ -74,9 +74,19 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   the emulators' "stretch to window". On a 2.1.0 `main` the finder checks its result against the mods' sites (agree
   or disagree per site) and against the size pairs Fl4sh_ turns into 2580x1080 (0x6caff8, 0x6cb060, 0x70a634); on
   1.0.0 it verifies the pattern inside `getAspect` itself and names its callers.
-  Not done yet: the finder has not run on a real `main` (no game data on the machine the change was written on), so
-  `patches-upd.txt` has no `aspect` set and `res_init` logs that; its `--selftest` covers the forms on a synthetic
-  image. To finish: `fps_sites_xc2.py main > patches-upd.txt`, `aspect_sites_xc2.py main --sizes >> patches-upd.txt`
+  Run on 1.0.0 (2026-11-03, `build/extracted/v0`): five sites, all camera code. `ml::DevGraphNx::getPersSys`+0x60,
+  the projection builder, divides DevGraph's render size (+0x230 / +0x234) inline for its own matrix (it neither calls
+  `getAspect`, which has no caller at all, nor reads a cached field); `ml::ScnObjCam::apply`+0x30 (from the viewport),
+  `ml::ScnObjCam::setSize`+0x4c and `ml::ScnCamMan::update`+0x188 store their quotient to RENDER_INFO +0x1f0, the
+  aspect the frustum is derived from, so they are patched as well (a widened projection with a 16:9 frustum would cull
+  at the sides); `getAspect`+0x28 itself is the fifth. `getAspect` and `setSize` are leaves, patched through x8 and x9
+  (their converted width dies at the `ret` or the tail call); the others through x30. `gen.py --patches` accepts the
+  set (no mismatched word, five gated sites in the C). The 15 other divisions of converted integers are HP rates, menu
+  buttons, the minimap, the layout and `gf::PlayerCamera`'s root-size aspect (1280/720, the interface canvas), left
+  alone. 1.0.0 has no 1920/1080 pair; its 1280/720 pairs are `ml::WorkRoot::getWidth`, `grlib::CGLibDisplay::setup`,
+  `ui::UILayoutObject::updateSize`, the movie player and the title loader. The five sites are `KNOWN_SITES['1.0.0']`.
+  Not done yet: the finder has run on 1.0.0 only; `patches-upd.txt` (3.0.1) has no `aspect` set yet and `res_init`
+  logs that. Its `--selftest` covers the forms on a synthetic image. To finish: `fps_sites_xc2.py main > patches-upd.txt`, `aspect_sites_xc2.py main --sizes >> patches-upd.txt`
   (stderr names each site's function, the sites it left unpatched and why), `gen.py --patches`, build, and a run at
   3440x1440 with `XC2_OUTPUT_RES=3440x1440`: the 3D view must show more at the sides, not a stretched 16:9. Which of
   the three sites is the field camera and which the menus or the map is not known; run 2.1.0 first, where the mods'
