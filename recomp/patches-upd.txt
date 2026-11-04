@@ -89,3 +89,12 @@ site aspect main 6c2c18 1e211800 @page:x30 bd4063c0
 site aspect main 6cb88c 1e201900 @page:x30 bd4063c0
 site aspect main 6cb8f4 1e201900 @page:x30 bd4063c0
 site aspect main 6cc854 1e211800 @page:x30 bd4063c0
+
+# XC2 3.0.1 render size and scale (tools/size_sites_xc2.py; NOTES.md "Known gaps"). Generated from the game's main.
+set size XC2_RENDER_RES 1
+site size main 700640 5280a015 @page:x21 b9406ab5
+site size main 700644 52805a16 @page:x22 b9406ed6
+site size main 6f4f74 d2e2d409 @page:x9 f9403d29
+set scale XC2_FIXED_SCALE 1
+site scale main 7a1510 1e200842 @page:x8 bd407102 900010a8
+site scale main 7a1518 1e200821 @page:x8 bd407101 900010a8
