@@ -5,10 +5,11 @@
 The end-to-end test runs the real CLI in --verify mode on a finished install (every step skips) and folds its events
 through the same code the window uses (the fixture's step keys are recomputed for the checkout under test, because the keys fingerprint recomp/, tools/ and runtime/). The install is build/inst-gui/e2e-install: hard links to build/install-test, so
 nothing there is written, except the state file and xc2.ini, which a run rewrites and which are copied. The run hashes
-the 17 GB RomFS; it is skipped when the hash differs from the expected one in all three tries. On the developer machine
-(RAM with a bad bit) a buffered read of a file sometimes returns flipped bits from the page cache while the file on
-disk is intact (an unbuffered read of install-test's romfs.bin gives the expected hash), so such a skip is the machine,
-not the installer. It is also skipped when build/install-test is absent.
+the 17 GB RomFS. On one developer machine (RAM with a bad bit) a buffered read of a file sometimes returned flipped bits
+from the page cache while the file on disk was intact, so a run whose only complaint is the RomFS hash is tried again,
+up to three times, and each repeat is printed. That is the one flaky case proven, and only that case: a warning about any
+other step fails at once, and a hash wrong in all three tries fails too, because a skip there would also hide a verify
+that reports intact files as changed. It is skipped only when build/install-test is absent.
 """
 import io
 import json
@@ -41,11 +42,36 @@ START = {'type': 'start', 'release': 'r1', 'mode': 'install', 'dest': 'D:\\T', '
          'steps': ['check', 'extract', 'lift', 'compile', 'prepare', 'cleanup']}
 
 
+def changed_outputs(model):
+    """The steps whose kept output the run's verify reported as changed."""
+    return [params.get('step') for id, params in model.warnings if id == 'state.output_changed']
+
+
+def only_romfs_hash_failed(model):
+    """The one result worth another try (module docstring): the extraction's kept output failed its hash, nothing else."""
+    return changed_outputs(model) == ['extract']
+
+
 def fold(*events):
     m = Model()
     for e in events:
         m.apply(e)
     return m
+
+
+class VerifyRetryTest(unittest.TestCase):
+    @staticmethod
+    def warned(*steps):
+        return fold(*({'type': 'warning', 'id': 'state.output_changed', 'params': {'step': s}} for s in steps))
+
+    def test_only_the_romfs_hash_alone_earns_another_try(self):
+        self.assertTrue(only_romfs_hash_failed(self.warned('extract')))
+        for steps in ((), ('compile',), ('dlc',), ('extract', 'compile')):
+            self.assertFalse(only_romfs_hash_failed(self.warned(*steps)), steps)
+
+    def test_other_warnings_do_not_count_as_changed_output(self):
+        model = fold({'type': 'warning', 'id': 'warn.kernel_old', 'params': {'version': '6.1'}})
+        self.assertEqual(changed_outputs(model), [])
 
 
 class ParseTest(unittest.TestCase):
@@ -344,7 +370,7 @@ def make_fixture():
 class EndToEndTest(unittest.TestCase):
     @staticmethod
     def run_cli(form, temp, tries=1):
-        """Runs the CLI in --verify mode through Process, up to `tries` times while the RomFS hash reads wrong."""
+        """Runs the CLI in --verify mode through Process, up to `tries` times while the RomFS hash alone reads wrong."""
         for attempt in range(tries):
             p = Process(form.command(sys.executable, root=ROOT, temp=temp, verify=True), cwd=ROOT)
             model, stray = Model(), []
@@ -363,8 +389,9 @@ class EndToEndTest(unittest.TestCase):
                 code = p.poll()
             p.kill()
             model.finish(code)
-            if not any(w[0] == 'state.output_changed' for w in model.warnings):
+            if not only_romfs_hash_failed(model):
                 break
+            print(f'\nend-to-end: try {attempt + 1} of {tries}: the RomFS hash read wrong')
         return code, model, stray, time.monotonic() - t0
 
     def test_verify_run_skips_every_step(self):
@@ -372,8 +399,8 @@ class EndToEndTest(unittest.TestCase):
         self.assertTrue(form.update_mode())
         code, model, stray, elapsed = self.run_cli(form, ROOT / 'build' / 'inst-gui' / 'e2e-temp', tries=3)
         print(f'\nend-to-end: exit {code}, result {model.result}, {elapsed:.1f} s, states {model.states}')
-        if any(w[0] == 'state.output_changed' for w in model.warnings):
-            self.skipTest('the RomFS hash read wrong three times (page cache of the faulty RAM, see the module docstring)')
+        self.assertEqual(changed_outputs(model), [], 'kept files reported as changed; the module docstring says when '
+                                                     'faulty RAM can do this for the RomFS, but three tries make it unlikely')
         self.assertEqual(code, 0, stray[-5:] or model.error)
         self.assertEqual(model.result, 'ok')
         self.assertIn(model.mode, ('resume', 'update'))
