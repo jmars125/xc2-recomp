@@ -95,6 +95,27 @@ set size XC2_RENDER_RES 1
 site size main 700640 5280a015 @page:x21 b9406ab5
 site size main 700644 52805a16 @page:x22 b9406ed6
 site size main 6f4f74 d2e2d409 @page:x9 f9403d29
+site size main 6421c4 320303e8 @page:x8 b9408108
+site size main 791a34 97fc452a @page:x0 b9408400
+site size main 791a3c 97fc4530 @page:x0 b9408800
 set scale XC2_FIXED_SCALE 1
 site scale main 7a1510 1e200842 @page:x8 bd407102 900010a8
 site scale main 7a1518 1e200821 @page:x8 bd407101 900010a8
+
+# XC2 3.0.1 interface placement (tools/ui_sites_xc2.py; NOTES.md "Resolution and ultrawide"). Generated from the game's main.
+set ui XC2_UI_CENTER 1
+site ui main 571118 1e2308a4 1e2308a4 @page:x9 bd40b127 1e270884
+site ui main 571130 1e230821 1e230821 @page:x9 bd40b527 1e270821
+site ui main 8391f4 bd455280 @page:x30 bd40a3c0
+site ui main 839200 bd455680 @page:x30 bd40a7c0
+site ui main 839328 bd43e260 @page:x30 3dc02fc1 3dc10a60 6e21dc00 3d810a60 3dc10e60 6e21dc00 3d810e60 3dc11260 6e21dc00 3d811260 3dc11660 6e21dc00 3d811660 bd43e260
+site ui main 8398a0 f90007ff @page:x30 f94057de f90007fe
+site ui main 8398c4 3954a008 52800028
+site ui main 83991c f90007ff @page:x30 f94057de f90007fe
+site ui main 839950 3954a268 52800028
+site ui main 839984 1e210841 @page:x30 bd40c7c1
+site ui main 83998c 1e200840 @page:x30 bd40c3c0
+site ui main 839ae8 1e230803 1e230803 @page:x30 bd40abc5 1e252863
+site ui main 839aec 1e240804 1e240804 @page:x30 bd40afc5 1e252884
+site ui main 839bc8 1e230803 1e230803 @page:x30 bd40abc5 fd41b006 5ee098c6 0e261ca5 1e252863
+site ui main 839bcc 1e240804 1e240804 @page:x30 bd40afc5 fd41b006 5ee098c6 0e261ca5 1e252884
