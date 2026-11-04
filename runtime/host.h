@@ -271,6 +271,7 @@ void rt_patch_switch(int set, int on);                     // at run time (live 
 void *rt_patch_page(void);                                 // the page the patched code reads (NULL without the table)
 void frame_step_init(void);                                // after rt_patches_init: the real-time step's first value
 void xc2_fixes_init(void);                                 // after rt_patches_init: host halves of recomp/fixes-upd.txt
+void xc2_view_widen(float factor);                         // the widen-view factor (1: the game's own view)
 int frame_step_realtime(void);                             // the real-time step is on: presents ignore the interval
 int frame_rate_paced(void);                                // XC2: the game runs at the frame limit (frame_rate.c)
 uint64_t frame_step_cap_ns(void);                          // with the real-time step: the shortest frame in ns

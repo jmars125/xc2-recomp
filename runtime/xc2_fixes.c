@@ -9,13 +9,18 @@
 // the object's list node pointing at itself means it is out of the list (nothing left to do), and its wind without a
 // proxy, or with its own node pointing at itself, means it is out of the broad phase (only that removal is skipped).
 // The cause of the double removal is not known; the checks only keep the game from stopping on it.
+//
+// Widen view (set wide): the scene's and the camera's 16:9 aspects are multiplied by the patch page's +0x110, which
+// xc2_view_widen sets for each presented frame (recomp/fixes-upd.txt has the sites).
 #include <stdint.h>
+#include <string.h>
 
 #include "host.h"
 #include "layout.h"
 
 #define MAIN(off) (MOD_MAIN_BASE + (off))
 #define WIND_HOST 0xfd0   // patch page offset, recomp/fixes-upd.txt @host:fd0
+#define WIDE_AT 0x108     // patch page: 16/9, the tolerance, the factor (set wide)
 
 static uint64_t ld64(uint64_t a) { return *(volatile uint64_t *)(uintptr_t)a; }
 static volatile int32_t *w32(uint64_t a) { return (volatile int32_t *)(uintptr_t)a; }
@@ -59,7 +64,16 @@ static void wind_remove(Cpu *c) {
     if (count <= 0) game_assert(c, 0x9804ac, 0x98044d, 0xaa);
 }
 
+void xc2_view_widen(float factor) {
+    uint8_t *page = rt_patch_page();
+    if (page) *(volatile float *)(page + WIDE_AT + 8) = factor;
+}
+
 void xc2_fixes_init(void) {
     uint8_t *page = rt_patch_page();
+    if (page) {
+        float wide[3] = {16.0f / 9.0f, 0.01f, 1.0f};
+        memcpy(page + WIDE_AT, wide, sizeof wide);
+    }
     if (page && rt_patch_enabled(rt_patch_set("wind"))) rt_register_host((uint64_t)(uintptr_t)(page + WIND_HOST), wind_remove);
 }

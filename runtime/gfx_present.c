@@ -22,6 +22,7 @@
 #include "fs.h"
 #include "gfx.h"
 #include "gfx_wsys.h"
+#include "host.h"
 #include "nvn_api.h"
 #include "ui/menu.h"
 #include "vk.h"
@@ -514,12 +515,23 @@ static void save_capture(const char *path) {
     rt_log("gfx: menu test shot %s (%dx%d)", path, g_cap_w, g_cap_h);
 }
 
+// The widen-view factor for a cw x ch picture in a dw x dh window: with XC2_PICTURE_FIT=widen and a window wider than
+// the picture, the window's aspect over the picture's. The game's 16:9 views then see that much more at the sides
+// (recomp/fixes-upd.txt set wide), and the picture is stretched to the window to show them in their shape; the 2D
+// interface is stretched with it. 1 otherwise.
+static float widen_factor(int cw, int ch, int dw, int dh) {
+    if (cw <= 0 || ch <= 0 || (int64_t)dw * ch <= (int64_t)dh * cw || strcmp(cfg_value("XC2_PICTURE_FIT"), "widen"))
+        return 1.0f;
+    return (float)((double)dw * ch / ((double)dh * cw));
+}
+
 // The rectangle {x, y, w, h} of a dw x dh swapchain image the cw x ch picture goes into: the whole image with
-// XC2_PICTURE_FIT=stretch, else the largest one of the picture's own aspect ratio, centred (a 16:9 picture on the Steam
-// Deck's 1280x800 screen gets bars of 40 rows above and below; a wider window, bars at the sides).
+// XC2_PICTURE_FIT=stretch or a widened view, else the largest one of the picture's own aspect ratio, centred (a 16:9
+// picture on the Steam Deck's 1280x800 screen gets bars of 40 rows above and below; a wider window, bars at the sides).
 void gfx_fit_rect(int cw, int ch, int dw, int dh, int out[4]) {
     out[0] = out[1] = 0, out[2] = dw, out[3] = dh;
-    if (cw <= 0 || ch <= 0 || !strcmp(cfg_value("XC2_PICTURE_FIT"), "stretch")) return;
+    if (cw <= 0 || ch <= 0 || !strcmp(cfg_value("XC2_PICTURE_FIT"), "stretch") || widen_factor(cw, ch, dw, dh) > 1.0f)
+        return;
     if ((int64_t)dw * ch > (int64_t)dh * cw) out[2] = (int)(((int64_t)dh * cw + ch / 2) / ch);   // window wider: pillarbox
     else out[3] = (int)(((int64_t)dw * ch + cw / 2) / cw);                                        // taller: letterbox
     out[2] += out[2] & 1, out[3] += out[3] & 1;   // even sizes keep the bars equal
@@ -618,6 +630,7 @@ static void present_image(VkImage src, VkImageLayout layout, VkFormat fmt, int w
     const int rect[4] = {cx, cy, cw, ch};
     int to[4];   // where the picture goes in the swapchain image: {x, y, w, h}
     gfx_fit_rect(cw, ch, (int)g_sc_ext.width, (int)g_sc_ext.height, to);
+    xc2_view_widen(widen_factor(cw, ch, (int)g_sc_ext.width, (int)g_sc_ext.height));
     if (to[2] != (int)g_sc_ext.width || to[3] != (int)g_sc_ext.height) {   // black bars beside or above and below it
         VkClearColorValue black = {.float32 = {0, 0, 0, 1}};
         VkImageSubresourceRange all = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
