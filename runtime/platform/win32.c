@@ -313,6 +313,29 @@ static int widen(const char *s, wchar_t *w, int cap) {
 
 #define WPATH 2048
 
+// Resolve separators and dot components before adding the extended-length prefix, which disables Win32 path
+// normalization. Non-path strings such as event names and process arguments use runtime/platform/win32.c widen.
+static int widen_path(const char *path, wchar_t *out, int cap) {
+    wchar_t w[WPATH], full[WPATH];
+    if (cap <= 0) return 0;
+    out[0] = 0;
+    if (!widen(path, w, WPATH)) return 0;
+    for (wchar_t *p = w; *p; p++)
+        if (*p == L'/') *p = L'\\';
+    const wchar_t *tail = w, *prefix = L"";
+    if (wcsncmp(w, L"\\\\?\\", 4) && wcsncmp(w, L"\\\\.\\", 4)) {
+        DWORD n = GetFullPathNameW(w, WPATH, full, NULL);
+        if (!n || n >= WPATH) return 0;
+        if (full[0] == L'\\' && full[1] == L'\\') prefix = L"\\\\?\\UNC\\", tail = full + 2;
+        else prefix = L"\\\\?\\", tail = full;
+    }
+    size_t a = wcslen(prefix), b = wcslen(tail);
+    if (a + b >= (size_t)cap) return 0;
+    memcpy(out, prefix, a * sizeof *out);
+    memcpy(out + a, tail, (b + 1) * sizeof *out);
+    return (int)(a + b + 1);
+}
+
 int plat_file_exists(const char *path) {
     wchar_t w[WPATH];
     if (!widen(path, w, WPATH)) return 0;
@@ -773,7 +796,7 @@ static int fs_err(DWORD e) {
 
 int plat_fs_kind(const char *path) {
     wchar_t w[WPATH];
-    if (!widen(path, w, WPATH)) return PLAT_FS_MISSING;
+    if (!widen_path(path, w, WPATH)) return PLAT_FS_MISSING;
     DWORD a = GetFileAttributesW(w);
     if (a == INVALID_FILE_ATTRIBUTES) return PLAT_FS_MISSING;
     return a & FILE_ATTRIBUTE_REPARSE_POINT ? PLAT_FS_LINK : a & FILE_ATTRIBUTE_DIRECTORY ? PLAT_FS_DIR : PLAT_FS_FILE;
@@ -781,19 +804,19 @@ int plat_fs_kind(const char *path) {
 
 int plat_fs_mkdir(const char *path) {
     wchar_t w[WPATH];
-    if (!widen(path, w, WPATH)) return PLAT_FS_ERROR;
+    if (!widen_path(path, w, WPATH)) return PLAT_FS_ERROR;
     return CreateDirectoryW(w, NULL) ? PLAT_FS_OK : fs_err(GetLastError());
 }
 
 int plat_fs_rmdir(const char *path) {
     wchar_t w[WPATH];
-    if (!widen(path, w, WPATH)) return PLAT_FS_ERROR;
+    if (!widen_path(path, w, WPATH)) return PLAT_FS_ERROR;
     return RemoveDirectoryW(w) ? PLAT_FS_OK : fs_err(GetLastError());
 }
 
 int plat_fs_unlink(const char *path) {
     wchar_t w[WPATH];
-    if (!widen(path, w, WPATH)) return PLAT_FS_ERROR;
+    if (!widen_path(path, w, WPATH)) return PLAT_FS_ERROR;
     DWORD a = GetFileAttributesW(w);
     if (a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_READONLY))
         SetFileAttributesW(w, a & ~(DWORD)FILE_ATTRIBUTE_READONLY);
@@ -802,19 +825,19 @@ int plat_fs_unlink(const char *path) {
 
 int plat_fs_rename(const char *from, const char *to, int durable) {
     wchar_t a[WPATH], b[WPATH];
-    if (!widen(from, a, WPATH) || !widen(to, b, WPATH)) return PLAT_FS_ERROR;
+    if (!widen_path(from, a, WPATH) || !widen_path(to, b, WPATH)) return PLAT_FS_ERROR;
     return MoveFileExW(a, b, durable ? MOVEFILE_WRITE_THROUGH : 0) ? PLAT_FS_OK : fs_err(GetLastError());
 }
 
 int plat_fs_link(const char *existing, const char *path) {
     wchar_t a[WPATH], b[WPATH];
-    if (!widen(existing, a, WPATH) || !widen(path, b, WPATH)) return PLAT_FS_ERROR;
+    if (!widen_path(existing, a, WPATH) || !widen_path(path, b, WPATH)) return PLAT_FS_ERROR;
     return CreateHardLinkW(b, a, NULL) ? PLAT_FS_OK : fs_err(GetLastError());
 }
 
 int plat_fs_links(const char *path) {
     wchar_t w[WPATH];
-    if (!widen(path, w, WPATH)) return 0;
+    if (!widen_path(path, w, WPATH)) return 0;
     HANDLE f = CreateFileW(w, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     BY_HANDLE_FILE_INFORMATION fi;
     int links = f != INVALID_HANDLE_VALUE && GetFileInformationByHandle(f, &fi) ? (int)fi.nNumberOfLinks : 0;
@@ -825,7 +848,7 @@ int plat_fs_links(const char *path) {
 // NTFS journals directory entries; flushing the directory handle is as far as Windows goes.
 void plat_fs_sync_dir(const char *path) {
     wchar_t w[WPATH];
-    if (!widen(path, w, WPATH)) return;
+    if (!widen_path(path, w, WPATH)) return;
     HANDLE h = CreateFileW(w, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
     if (h != INVALID_HANDLE_VALUE) {
@@ -836,7 +859,7 @@ void plat_fs_sync_dir(const char *path) {
 
 int plat_fs_list(const char *dir, int (*cb)(const char *name, int kind, uint64_t size, void *ctx), void *ctx) {
     wchar_t wd[WPATH], pat[WPATH + 4];
-    if (!widen(dir, wd, WPATH)) return PLAT_FS_ERROR;
+    if (!widen_path(dir, wd, WPATH)) return PLAT_FS_ERROR;
     swprintf(pat, WPATH + 4, L"%ls\\*", wd);
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(pat, &fd);
@@ -856,7 +879,7 @@ int plat_fs_list(const char *dir, int (*cb)(const char *name, int kind, uint64_t
 
 static PlatFile *fs_open(const char *path, DWORD access, DWORD share, DWORD how, int *err) {
     wchar_t w[WPATH];
-    if (!widen(path, w, WPATH)) {
+    if (!widen_path(path, w, WPATH)) {
         if (err) *err = PLAT_FS_ERROR;
         return NULL;
     }

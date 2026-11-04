@@ -33,12 +33,12 @@
 #define NFILES 1024
 #define NDIRS 256
 #define NMOUNTS 16
-#define PATH_CAP 1100
+#define PATH_CAP (1100 + 769)   // host root plus the guest path and its terminator
 
 enum { M_FREE, M_SAVE, M_TEMP, M_CACHE, M_SAVE_RO, M_AOC };   // M_SAVE: the working copy; M_SAVE_RO: the committed
                                                               // save; M_AOC: add-on content (read-only)
 
-typedef struct { int kind; char name[32]; char root[1024]; } Mount;
+typedef struct { int kind; char name[32]; char root[1100]; } Mount;
 typedef struct { PlatFile *h; int mode, save; } File;   // h NULL = free; save: on a save-data mount
 typedef struct { char *name; int kind; uint64_t size; } Listed;
 typedef struct { Listed *e; int n, next, mode, used; } Dir;   // the directory's entries at open; used 0 = free
@@ -482,6 +482,7 @@ void fs_host_set_profile(const char *dir) {
 // ---- mounts and paths
 static uint32_t mount_add(const char *name, int kind, const char *root) {
     if (!name || !*name || strlen(name) >= 32 || strchr(name, ':') || strchr(name, '/')) return FS_R_INVALID_ARGUMENT;
+    if (!root || strlen(root) >= sizeof mounts[0].root) return FS_R_INVALID_PATH;
     char as_path[40];
     snprintf(as_path, sizeof as_path, "%s:", name);
     if (romfs_owns(as_path)) return FS_R_ALREADY_EXISTS;   // the RomFS mount's name
@@ -504,12 +505,29 @@ static uint32_t mount_add(const char *name, int kind, const char *root) {
 }
 
 // A path component every host stores under exactly this name: not empty, ".", "..", no reserved character, no trailing
-// dot or space (Windows strips those, which would alias two names).
+// dot or space (Windows strips those, which would alias two names), and no DOS device basename.
 static int component_ok(const char *c, size_t n) {
     if (!n || (n == 1 && c[0] == '.') || (n == 2 && c[0] == '.' && c[1] == '.')) return 0;
     if (c[n - 1] == '.' || c[n - 1] == ' ') return 0;
     for (size_t i = 0; i < n; i++)
         if ((unsigned char)c[i] < 32 || strchr("\\:*?\"<>|", c[i])) return 0;
+    size_t base = 0;
+    while (base < n && c[base] != '.') base++;
+    while (base && c[base - 1] == ' ') base--;
+    if (base < 8) {
+        char name[8];
+        for (size_t i = 0; i < base; i++) name[i] = c[i] >= 'a' && c[i] <= 'z' ? c[i] - 'a' + 'A' : c[i];
+        name[base] = 0;
+        if (!strcmp(name, "CON") || !strcmp(name, "PRN") || !strcmp(name, "AUX") || !strcmp(name, "NUL") ||
+            !strcmp(name, "CONIN$") || !strcmp(name, "CONOUT$")) return 0;
+        if (!strncmp(name, "COM", 3) || !strncmp(name, "LPT", 3)) {
+            if (base == 4 && name[3] >= '1' && name[3] <= '9') return 0;
+            // Windows also treats the UTF-8 superscript digits 1, 2 and 3 as device numbers.
+            if (base == 5 && (unsigned char)name[3] == 0xc2 &&
+                ((unsigned char)name[4] == 0xb9 || (unsigned char)name[4] == 0xb2 || (unsigned char)name[4] == 0xb3))
+                return 0;
+        }
+    }
     return 1;
 }
 
@@ -519,7 +537,7 @@ static uint32_t host_path_kind(const char *path, char *out, size_t cap, int *kin
     const char *colon = strchr(path, ':');
     if (!colon || colon[1] != '/') return FS_R_INVALID_PATH;
     size_t n = (size_t)(colon - path);
-    char root[1024];
+    char root[1100];
     int k = M_FREE;
     plat_mutex_lock_shared(&lock);
     for (int i = 0; i < NMOUNTS; i++)
