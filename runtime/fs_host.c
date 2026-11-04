@@ -743,13 +743,13 @@ static File *file_of(uint64_t h, PlatFile **fh, int *mode) {
     return v ? f : NULL;
 }
 
-// Positional reads: bytes read at off, 0 at the end, -1 on an error.
+// Positional reads: bytes read at off, 0 at the end, negative platform errors otherwise.
 static int64_t host_read_at(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
     mem_thaw((uintptr_t)buf, n);   // the kernel's write would fail on a frozen page instead of faulting
     int64_t got = plat_file_pread(f, buf, n, off);
     if (got == -2)   // a read-only page in the buffer: a frozen region missed its thaw
         rt_log("fs: read of %u bytes into %p refused: the buffer is not writable", n, buf);
-    return got < 0 ? -1 : got;
+    return got;
 }
 
 static uint32_t open_file(uint64_t *out, const char *path, int mode) {
@@ -786,13 +786,23 @@ static uint32_t read_file(uint64_t *out, uint64_t h, int64_t offset, void *buffe
     if (romfs_handle(h)) return romfs_read(out, h, offset, buffer, size);
     PlatFile *f;
     int mode;
-    if (!out || offset < 0 || (!buffer && size) || !file_of(h, &f, &mode)) return FS_R_INVALID_ARGUMENT;
+    if (!out || offset < 0 || size > (uint64_t)INT64_MAX - (uint64_t)offset ||
+        (!buffer && size) || !file_of(h, &f, &mode)) return FS_R_INVALID_ARGUMENT;
     if (!(mode & FS_OPEN_READ)) return FS_R_OPEN_MODE;
     uint64_t done = 0;
     while (done < size) {
         uint32_t chunk = size - done > 0x40000000 ? 0x40000000 : (uint32_t)(size - done);
-        int64_t n = host_read_at(f, (uint8_t *)buffer + done, chunk, (uint64_t)offset + done);
-        if (n < 0) rt_fatal("fs: host save read failure");
+        int64_t n;
+        // A host byte-range lock may outlive one call; retry the same bytes for at most two seconds.
+        for (int retry = 0;; retry++) {
+            n = host_read_at(f, (uint8_t *)buffer + done, chunk, (uint64_t)offset + done);
+            if (n != -PLAT_FS_BUSY || retry == 40) break;
+            plat_sleep_ms(50);
+        }
+        if (n < 0) {
+            *out = done;
+            return FS_R_INVALID_ARGUMENT;
+        }
         if (!n) break;
         done += (uint64_t)n;
     }
@@ -809,20 +819,26 @@ static uint32_t read_exact(uint64_t h, int64_t off, void *buf, uint64_t size) {
 static uint32_t write_file(uint64_t h, int64_t offset, const void *buffer, uint64_t size, const int32_t *option) {
     PlatFile *f;
     int mode;
-    File *file = offset < 0 || (!buffer && size) ? NULL : file_of(h, &f, &mode);
+    File *file = offset < 0 || size > (uint64_t)INT64_MAX - (uint64_t)offset || (!buffer && size)
+                     ? NULL : file_of(h, &f, &mode);
     if (!file) return FS_R_INVALID_ARGUMENT;
     if (!(mode & FS_OPEN_WRITE)) return FS_R_OPEN_MODE;
     PlatFileId id;
-    if (!plat_file_id(f, &id)) rt_fatal("fs: host save size");
+    if (!plat_file_id(f, &id)) return FS_R_INVALID_ARGUMENT;
     if ((uint64_t)offset + size > id.size && !(mode & FS_OPEN_APPEND)) return FS_R_APPEND_REQUIRED;
     if (file->save) save_touched();
     for (uint64_t done = 0; done < size;) {
         uint32_t chunk = size - done > 0x40000000 ? 0x40000000 : (uint32_t)(size - done);
-        int64_t put = plat_file_pwrite(f, (const uint8_t *)buffer + done, chunk, (uint64_t)offset + done);
-        if (put <= 0) rt_fatal("fs: host save write failure");
+        int64_t put;
+        for (int retry = 0;; retry++) {
+            put = plat_file_pwrite(f, (const uint8_t *)buffer + done, chunk, (uint64_t)offset + done);
+            if (put != -PLAT_FS_BUSY || retry == 40) break;
+            plat_sleep_ms(50);
+        }
+        if (put <= 0) return FS_R_INVALID_ARGUMENT;
         done += (uint64_t)put;
     }
-    if (option && (*option & 1)) plat_file_fsync(f);   // WriteOptionFlag_Flush
+    if (option && (*option & 1) && !plat_file_fsync(f)) return FS_R_INVALID_ARGUMENT;   // WriteOptionFlag_Flush
     return 0;
 }
 

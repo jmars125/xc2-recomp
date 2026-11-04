@@ -280,7 +280,7 @@ PlatFile *plat_file_open(const char *path);               // read-only; NULL whe
 PlatFile *plat_file_open_unbuffered(const char *path);
 void plat_file_close(PlatFile *f);
 // Bytes read at off (0 at or past the end of the file), -1 on an I/O error, -2 when the OS refused to write into buf
-// (a read-only page).
+// (a read-only page), -PLAT_FS_BUSY on a retryable host lock conflict.
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off);
 // What changes when the file is replaced or written: its volume, file id, size, last write and creation (on Linux,
 // status change) times in the OS's units. 0 on failure.
@@ -307,7 +307,8 @@ int plat_fs_list(const char *dir, int (*cb)(const char *name, int kind, uint64_t
 // An existing file for reading and, with write, writing; *err (may be NULL) gets the reason on failure.
 PlatFile *plat_fs_open(const char *path, int write, int *err);
 PlatFile *plat_fs_create(const char *path, int *err);     // a new file for writing; PLAT_FS_EXISTS when there
-int64_t plat_file_pwrite(PlatFile *f, const void *buf, uint32_t n, uint64_t off);   // bytes written, -1 on error
+// Bytes written, -1 on an I/O error, -PLAT_FS_BUSY on a retryable host lock conflict.
+int64_t plat_file_pwrite(PlatFile *f, const void *buf, uint32_t n, uint64_t off);
 int plat_file_set_size(PlatFile *f, uint64_t size);       // PLAT_FS_*
 int plat_file_fsync(PlatFile *f);                         // the file's data to the disk; 1 on success
 int plat_temp_dir(char *out, size_t cap);                 // the user's temporary directory, no trailing separator

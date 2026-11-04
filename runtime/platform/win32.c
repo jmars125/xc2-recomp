@@ -730,6 +730,8 @@ void plat_file_close(PlatFile *f) {
     if (f) CloseHandle((HANDLE)f);
 }
 
+static int fs_err(DWORD e);
+
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
     static __thread HANDLE ev;
     if (!ev && !(ev = CreateEventW(NULL, TRUE, FALSE, NULL))) return -1;
@@ -741,7 +743,7 @@ int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
         if (GetOverlappedResult((HANDLE)f, &ov, &got, TRUE)) return got;
         e = GetLastError();
     }
-    return e == ERROR_HANDLE_EOF ? 0 : e == ERROR_NOACCESS ? -2 : -1;
+    return e == ERROR_HANDLE_EOF ? 0 : e == ERROR_NOACCESS ? -2 : fs_err(e) == PLAT_FS_BUSY ? -PLAT_FS_BUSY : -1;
 }
 
 int plat_file_id(PlatFile *f, PlatFileId *out) {
@@ -766,7 +768,7 @@ static int fs_err(DWORD e) {
     case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: case ERROR_DIRECTORY: return PLAT_FS_NOT_FOUND;
     case ERROR_FILE_EXISTS: case ERROR_ALREADY_EXISTS: return PLAT_FS_EXISTS;
     case ERROR_DIR_NOT_EMPTY: return PLAT_FS_NOT_EMPTY;
-    case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: return PLAT_FS_BUSY;
+    case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: case ERROR_LOCK_VIOLATION: return PLAT_FS_BUSY;
     default: return PLAT_FS_ERROR;
     }
 }
@@ -881,8 +883,12 @@ int64_t plat_file_pwrite(PlatFile *f, const void *buf, uint32_t n, uint64_t off)
     OVERLAPPED ov = {.Offset = (DWORD)off, .OffsetHigh = (DWORD)(off >> 32), .hEvent = ev};
     DWORD put = 0;
     if (WriteFile((HANDLE)f, buf, n, &put, &ov)) return put;
-    if (GetLastError() == ERROR_IO_PENDING && GetOverlappedResult((HANDLE)f, &ov, &put, TRUE)) return put;
-    return -1;
+    DWORD e = GetLastError();
+    if (e == ERROR_IO_PENDING) {
+        if (GetOverlappedResult((HANDLE)f, &ov, &put, TRUE)) return put;
+        e = GetLastError();
+    }
+    return fs_err(e) == PLAT_FS_BUSY ? -PLAT_FS_BUSY : -1;
 }
 
 int plat_file_set_size(PlatFile *f, uint64_t size) {

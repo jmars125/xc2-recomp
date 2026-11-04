@@ -1017,7 +1017,7 @@ int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
     ssize_t k;
     do k = pread(fd_of(f), buf, n, (off_t)off);
     while (k < 0 && errno == EINTR);
-    return k >= 0 ? k : errno == EFAULT ? -2 : -1;
+    return k >= 0 ? k : errno == EFAULT ? -2 : errno == EBUSY || errno == EAGAIN ? -PLAT_FS_BUSY : -1;
 }
 
 int plat_file_id(PlatFile *f, PlatFileId *out) {
@@ -1128,7 +1128,7 @@ int64_t plat_file_pwrite(PlatFile *f, const void *buf, uint32_t n, uint64_t off)
     ssize_t k;
     do k = pwrite(fd_of(f), buf, n, (off_t)off);
     while (k < 0 && errno == EINTR);
-    return k;
+    return k < 0 && (errno == EBUSY || errno == EAGAIN) ? -PLAT_FS_BUSY : k;
 }
 
 int plat_file_set_size(PlatFile *f, uint64_t size) { return ftruncate(fd_of(f), (off_t)size) ? fs_err(errno) : 0; }
