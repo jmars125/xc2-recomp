@@ -140,8 +140,6 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   graphic 0x20000000, 3.0.1 main+0x6421b4) and `ml::WorkRootMem::initialize` mallocs them, GLIBTOP's parent being the
   512 MiB one, so any budget past about 400 MiB failed at GLIBTOP's creation however large the heap was. The set size now
   loads that size from page +0x80. Last, the u32 sum of `grlib::CGLibMemHandle::setup`, hence `RES_BUDGET_MAX` 3584 MiB.
-  The abort handler: `nn::ro::detail::GetExceptionInfo` reads 4 bytes past a module's image, so `loader.c load_module`
-  commits a zero page after each one, to let the game's own abort message through.
 - The centred rectangle at wide render sizes (2026-11-04; open, and still there with the render target table laid out for the render size: single frames of the opening at 3840x1080 show the same edges at world seconds 48 to 52.5). At 3840x1080 many cutscenes show a hard-edged rectangle
   x 1280..2560, y 177..902 (1280x720 centred, the frames' edges measured in `build/series-4k`) and one x 1024..2816,
   y 32..1046 (the same with 256 and 144 pixels more on each side, a factor of 1.4): inside the inner one the picture is
@@ -155,16 +153,20 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   A rectangle of exactly 1280x720 pixels, centred, with no such constant in the code, points at geometry from data: a
   screen-space ptlib emitter, sized in pixels in its effect file, whose shader maps pixels to clip space with the render
   size (`RenderGrObj::draw` stores 1/width and 1/height at +0x80): an assumption, the shaders were not read.
-  Found on the way, and fixed in the set size: `setupMemBuff` lays out the byte offsets of all post-process targets from
-  the 1280x720 canvas while the targets take the render size, so past 720p they overlap in memory, and the Vulkan back end
-  binds them at those offsets (`vk_texture.c`). This is the likeliest meaning of emoose's remark that a larger size
-  breaks some cutscene effects in the emulators; it is not the rectangle, which stays with the targets apart. Running 1.0.0's `setupMemBuff` in
-  Unicorn with the size calls stubbed at 4 bytes per pixel: 141 targets, 336 MiB at 1280x720, 94 of them with a size
-  from the canvas. So GLIBPXL is budgeted as 362 MiB times pixels over 1280x720 (`resolution.c decide`): 3840x1080
-  takes 1629 MiB and a 4.5 GiB application pool, 5120x1440 2896 MiB, and 7680x2160 needs 6516 MiB, past the 3584 MiB
-  `RES_BUDGET_MAX`, so its table is laid out for 5694x1600 and overlaps above that.
-  Next step if the rectangle remains: a frame capture of one of the frames above, looking for the draw that writes
-  exactly that rectangle, then its shader and its uniforms.
+  Found on the way, in the set size: `setupMemBuff` lays out the byte offsets of all post-process targets from the 1280x720
+  canvas while the targets take the render size, so past 720p they overlap in memory, and the Vulkan back end binds them
+  at those offsets (`vk_texture.c`). It is not the rectangle, which stays with the targets apart. What each size needs, read
+  from the last texture in the GLIBPXL pool in logged runs: 597 MiB at 1920x1080, 1096 at 3840x1080, 1818 at 5120x1440, 2297 at
+  a table for 5694x1600; 253 bytes per pixel over the 362 MiB of 720p covers them. So up to 1920x1080 the pool, the budget and
+  the table stay the game's (the targets overlap there; no defect seen in the opening beside the runs with them apart), and
+  above it the budget is that sum (`resolution.c decide`), up to `RES_BUDGET_MAX`.
+  The rectangle's draws, from `XC2_DUMP` at world second 49.5, 3840x1080: pass 144, 1920x540 rgba16f, draws 5, targets
+  the effect target; the rectangles first appear there and pass 145 composites them over the picture. Pipes vs 20bf4716f33f4228 (progs 1508) and the others after pipe 0 share camera block
+  c4 at one address: `[0]` 2/3840, `[1]` 2/1080, identity view: a screen-space projection in pixels, so a quad of +-640 x +-360 (inferred; the vertices were not read)
+  covers exactly the inner rectangle, and +-896 x +-507 the outer one. The same rectangle shows at 1920x1080, so it comes with
+  any render size past 720p. `ml::DevGraphNx::getOrthoSys` builds such a matrix, but making it use the root size did not
+  change the frame, so c4 has another writer: not found. Next step: the writer of c4 (`ptlib::renderer::RenderGrObj` reads
+  the render size from its work info at +0x550), or the VS's use of it.
 - 60 fps, 3.0.1 (2026-11-02; on by default, `XC2_FPS_LIMIT=30` or `XC2_FPS60=0` for the shipping 30):
   - Frame pacing is a spin in the main thread, main+0x6aafd8: it reads the system tick until the time since the frame
     began exceeds period * interval * 0.997 (constant main+0x9b558c). The period comes from virtual +0xd0 of the object
