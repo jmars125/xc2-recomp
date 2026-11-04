@@ -145,6 +145,21 @@ static void cam_rate_store(double step) {
     step_factor(page, 0x104, 0.3f);
 }
 
+// The step of the 2D interface's layer library: a f32 at +0x80 of the layer::LayerManager the pointer at main+0xc232c8
+// holds (3.0.1; 2.1.0 main+0xc222c8; the name comes from the base game's symbols). layer::LayerObj updateAnimObj and
+// apply, LayerActBase updateAction, LayerObjPlace updateGblFrm and the top objects' updateFast add it to each animation's
+// clock every frame. The constructor sets it to 1/30 and +0x7c to 30, and nothing changes them: the game's
+// setFrameRate has no caller. So layouts ran at double speed at 60 fps. +0x7c stays 30: authored frames per second,
+// not a rate of play. Stored every frame like xc2_delta_store, so in cutscenes it holds 1/30 as shipped.
+static void xc2_layer_step_store(void) {
+    uint64_t obj = 0;
+    if (!plat_mem_read(MOD_MAIN_BASE + 0xc232c8, &obj, 8) || !obj || (obj & 3) || !plat_mem_readable(obj + 0x80, 4)) return;
+    float step = (float)step_now;
+    uint32_t bits;
+    memcpy(&bits, &step, 4);
+    __atomic_store_n((uint32_t *)(uintptr_t)(obj + 0x80), bits, __ATOMIC_RELEASE);
+}
+
 int frame_rate_paced(void) { return xc2_words != NULL; }
 
 // Cutscenes and pre-rendered movies run at 30 fps, as the console runs them: event scenes advance per frame, so at
@@ -262,6 +277,7 @@ uint64_t frame_step_cap_ns(void) {
         xc2_interval_store(cut ? 2 : 1);
         xc2_delta_store();
         cam_rate_store(step_now);
+        xc2_layer_step_store();
         if (cut) hz = 30;
         xc2_wait_store(1.0 / hz);
     }

@@ -66,8 +66,8 @@ game tick).
   - Writing 1 there gives a steady 60 fps (59.7 mean). The game then runs at double speed: the title screen changes as
     much in 30 frames at 60 fps as in 30 frames at 30 fps. Logic steps a fixed 1/30 s per frame: the f32 constant at
     main+0x9b5148 has 78 loads (adrp page 0x9b5000 + `ldr s, #0x148`), the frame step a patch set has to send to the patch page.
-  - Patch set xc360 (`tools/fps_sites_xc2.py` -> `recomp/patches-upd.txt`): the 79 1/30 loads read patch page
-    +0x50, the frame wait +0x48, the frame-time getter +0x50. The interval is set to 1 by
+  - Patch set xc360 (`tools/fps_sites_xc2.py` -> `recomp/patches-upd.txt`): the 1/30 loads read patch page
+    +0x50 (79, 16 of them returned to the constant below), the frame wait +0x48, the frame-time getter +0x50. The interval is set to 1 by
     `frame_rate.c xc2_interval_store`. Result: 59.9 fps at a 60 limit and 114 fps at 120. Alone it left play at
     double speed (the new-game script reached the Arts tutorial at 40 s instead of about 60 s).
   - The step most logic advances by is two f32, 1/30 each, at +0x78 and +0x7c of the object main+0xb900d0 points to;
@@ -76,8 +76,26 @@ game tick).
     scanning main's data for a pointer to two 1/30 at +0x78. `frame_rate.c xc2_delta_store` writes the measured frame
     time there every frame. New-game script at a 60 limit (45-60 fps): the first fight lasts 43 s against 47 s at 30
     fps, and the script reaches Goldmouth as at 30.
-  - Still faster than real time: the title screen and 2D interface (cloud motion per second 9.3 against 5.6 at 30; the
-    cheat's users report the same). The cheat also writes 60 (30 in its other branch) to +0xbd4 of the object at
+  - The title screen and 2D interface were faster than real time (cloud motion per second 9.3 against 5.6 at 30; the
+    cheat's users report the same). `frame_rate.c xc2_cutscene` runs the title at 30 fps, which hides that there; play
+    has event state 0, so its menus stayed fast. Four separate per-frame assumptions, found with the base game's symbols
+    and the `# REF:` lines of masagrator's FPSLocker-Warehouse (`0100E95004038000/4F5C96E2D97F45AC.yaml`):
+    - layer animations: [main+0xc232c8]+0x80 is `layer::LayerManager`'s seconds per frame, 1/30, and +0x7c is 30
+      (constructor; `setFrameRate` has no caller). Now the measured step: `frame_rate.c xc2_layer_step_store`.
+    - ui motions and event delays: `ui::UIMotionData` and the menus' `requestObjectEvent` turn authored frames into
+      seconds with the 1/30 constant, and those seconds run out against the frame step. The set xc360 had replaced
+      that constant with the step, so N frames took N rendered frames. Those 16 loads keep 1/30
+      (`tools/fps_sites_xc2.py UI_FRAME_LENGTH`). `btl` and `event` loads were not classified; some look like the same
+      conversion.
+    - menu waits: all 27 instances of `gf::GfMenuSequence<T, N>::wait` count rendered frames; the set scales the count
+      by patch page +0x4c (FPSLocker scales only the two of `GfMenuObjQuestLog`).
+    - button challenge: `btl::ButtonChallenge::Update` sends delta * 30 as a `ui::UICtrl` speed that `ui::UICtrl::update`
+      multiplies by the delta again, which only came out right while the motion lengths were halved too. Now 1, the
+      shipping value at 30 fps.
+    FPSLocker's effect speed (main+0x17794c) is not applied: it is not 2D interface.
+    Measured at the title with `XC2_CUTSCENE_30=0`: the dialog's arrows pulse every 0.25 s at 60 fps before and 0.50 s at both rates
+    after, and the title's clouds, which are 3D and not this, still change faster at 60 than at 30, the same with and without it.
+    Measure the title with `XC2_CUTSCENE_30=0`, or it runs at 30 fps. The cheat also writes 60 (30 in its other branch) to +0xbd4 of the object at
     2.0.2 main+0xf82ed8, and picks its branch on 2.0.2 main+0xbd7e2c == 1.0f and main+0xbd4380 == 0 (its cutscene
     test). The cheat's text (OldManKain, thread post #502) reads `[main+0xbd4380] != 0` as "cutscene": interval 2,
     step 1/30, +0xbd4 = 30. The 2.1.0 cheat uses the same two addresses, and 2.1.0 lays bss out as 2.0.2; 3.0.1 moved
