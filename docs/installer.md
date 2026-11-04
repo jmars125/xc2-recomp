@@ -39,7 +39,8 @@ release that changes nothing game-derived skips the rebuild.
 1. **Check** before writing anything: the files open with the keys, the update is 3.0.1 (by hash, as
    `tools/extract.py`), the keys are new enough for the update, enough space is free on the target disk (about 32 GiB with the add-on content at the peak
    of a first install, 25 GiB after it), the CPU has
-   AVX2 (`-march=x86-64-v3`), a Vulkan 1.3 GPU exists. Each failure is one clear message.
+   AVX2 (`-march=x86-64-v3`), a Vulkan 1.3 GPU exists and offers the extensions the game cannot start without
+   (`installer/hostcheck.c`, the same list as `runtime/vk_device.c`). Each failure is one clear message.
 2. **Extract** ExeFS and RomFS into the install folder and verify the hashes.
 3. **Add-on content**: the RomFS of each chosen NSP goes to `aoc/<index>/`, decrypted with the NSP's own ticket.
 4. **Lift** the ExeFS to C (`recomp/gen.py`) into a temp folder next to the installer.
@@ -184,7 +185,10 @@ Without Actions, the same two scripts build the packages locally; on Windows run
 ## Constraints
 
 - The installer steps contain no Win32 calls: Linux runs the same steps with its own compiler ("Linux release").
-- The keys file path is passed to the tools; key values never appear in the UI, logs or files.
+- The keys file path is passed to the tools; key values never appear in the UI or logs. hactool reads keys by path, so
+  while it runs a private folder under the temp folder's `keys/` holds the copies it needs (`tools/extract.py`
+  `private_keys_folder`). The folder is removed afterwards, and a killed run's is removed at the start of the next run
+  (`installer/steps.py` `remove_stale_keys`).
 - The window is a front end over the CLI (`python -m installer --base ... --update ... --keys ... --lang ... --dest
   ...`), which prints one JSON progress event per line. Tests and CI use the CLI.
 - Paths may hold any Unicode characters (a Cyrillic user name puts the temp and install folders under it). Every exe
