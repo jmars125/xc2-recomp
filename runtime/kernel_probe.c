@@ -25,7 +25,7 @@ static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("  FAIL: " __VA_ARGS__); putchar('\n'); } } while (0)
 
 static uint64_t a_lock_waiter, a_cv_waiter, a_cv_order_waiter, a_arb_waiter, a_event_waiter, a_core_worker,
-    a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker;
+    a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker, a_target_worker;
 static uint64_t a_fib_init, a_fib_fin, a_fib_switch, a_fib_cur, tick_stub;
 
 // ---- helpers: SVCs through rt_svc, thread start and join
@@ -424,6 +424,74 @@ static void test_cores(Cpu *c) {
     CHECK(ok || !gate, "virtual cores");
 }
 
+// ---- a core waiter's target ends: core_kick leaves a waiter that lost its claim to a better one pointing at the owner.
+// The owner O starts on core 2 and may also run on core 1; W and the better B may only run on core 2. Both target O.
+// O's checkpoint gives core 2 to B and moves on to core 1, where it exits and its handle is closed, while W keeps
+// polling (core_take, ap_try). In round 0 the handle is closed first, so thr_free runs inside thread_finish; in round 1
+// it is closed after the exit. thr_free must leave no thread pointing at O: W's next ap_try would read freed memory
+// (under ASan, an error here; on a plain build, a poll of whichever thread reuses the block).
+typedef struct { volatile int go, on_core; } TargetJob;
+
+static void target_worker(Cpu *c) {
+    TargetJob *j = arg_p(c, 0);
+    j->on_core = 1;
+    while (!j->go) plat_pause();   // no SVC or indirect call: the core stays until go, whatever waits for it
+    exit_thread(c);
+}
+
+static uint32_t target_thread(Cpu *c, TargetJob *j, int prio, uint64_t mask) {
+    uint32_t h = create(c, a_target_worker, j, prio, 2);
+    CHECK(sv(c, 0x0F, h, 2, mask, 0) == 0, "SetThreadCoreMask(%#x)", h);
+    start(c, h);
+    return h;
+}
+
+// Until the waiter w targets the owner o: 5 s at most.
+static int wait_target(Cpu *c, uint32_t w, uint32_t o) {
+    for (int i = 0; i < 5000; i++) {
+        if (kern_thread_target(w) == o) return 1;
+        sleep_ms(c, 1);
+    }
+    return 0;
+}
+
+static void test_core_target(Cpu *c) {
+    if (cfg_bool("XC2_FREE_CORES")) {   // no core waits: nothing has a target
+        printf("core waiter target: not checked (XC2_FREE_CORES is set)\n");
+        return;
+    }
+    int ok = 1;
+    for (int round = 0; round < 2; round++) {
+        TargetJob o = {0}, w = {0}, b = {0};
+        uint32_t ho = target_thread(c, &o, 50, 6);
+        while (!o.on_core) sleep_ms(c, 1);
+        uint32_t hw = target_thread(c, &w, 40, 4);
+        int claimed = wait_target(c, hw, ho);
+        uint32_t hb = target_thread(c, &b, 30, 4);
+        claimed &= wait_target(c, hb, ho);
+        CHECK(claimed, "round %d: the waiters never targeted the owner", round);
+        if (round == 0) CHECK(sv(c, 0x16, ho, 0, 0, 0) == 0, "CloseHandle(owner %#x)", ho);
+        o.go = 1;
+        while (!b.on_core) sleep_ms(c, 1);
+        if (round == 1) join(c, ho);
+        sleep_ms(c, 20);   // W's polls land on the ended owner
+        int cleared = 0;
+        for (int i = 0; i < 5000 && !cleared; i++) {   // round 0: B runs before O has finished exiting
+            cleared = kern_thread_target(hw) == 0;
+            if (!cleared) sleep_ms(c, 1);
+        }
+        CHECK(cleared, "round %d: the waiter still targets an ended, closed owner", round);
+        CHECK(!w.on_core, "round %d: the waiter ran before the better thread gave its core up", round);
+        ok &= claimed && cleared && !w.on_core;
+        b.go = 1;
+        join(c, hb);
+        w.go = 1;
+        join(c, hw);
+    }
+    printf("core waiter target: cleared when the targeted owner exits and closes, in either order: %s\n",
+           ok ? "ok" : "FAIL");
+}
+
 // ---- fibers: two fibers switch to each other; each checks its callee-saved registers, sp and tpidr survive
 typedef struct { uint64_t self, other; int id; } FiberJob;
 static volatile int32_t g_switches, g_runs[3];
@@ -620,6 +688,7 @@ static void probe_main(Cpu *c) {
     test_arbiter(c);
     test_events(c);
     test_cores(c);
+    test_core_target(c);
     test_fibers(c);
     test_exit(c);
     test_lifted_ticks(c);
@@ -692,6 +761,7 @@ int probe_kernel(void) {
     a_core_worker = hostfn_register("probe-kernel core worker", core_worker);
     a_exit_entry = hostfn_register("probe-kernel exit entry", exit_entry);
     a_exit_nested = hostfn_register("probe-kernel exit nested", exit_nested);
+    a_target_worker = hostfn_register("probe-kernel target worker", target_worker);
     a_fiber_fn = hostfn_register("probe-kernel fiber", fiber_fn);
     a_fiber_exit_thread = hostfn_register("probe-kernel fiber exit thread", fiber_exit_thread);
     a_fiber_exit_fn = hostfn_register("probe-kernel fiber exit", fiber_exit_fn);

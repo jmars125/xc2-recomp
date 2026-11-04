@@ -1506,6 +1506,11 @@ static void thr_free(RtThread *t) {   // holding G; t has exited and its handle 
             *p = t->all;
             break;
         }
+    // core_kick leaves a waiter's target in place until that waiter's core_take ends, and a waiter that lost its claim
+    // keeps polling it (ap_try). Every thread, not only g_core_wait: one that was granted a core and has not woken yet
+    // reads its target too (dg_done). The readers treat NULL as "no owner asked".
+    for (RtThread *w = g_all; w; w = w->all)
+        if (w->target == t) w->target = NULL;
     mem_kernel_free(t->tlr, TLR_SIZE + THREAD_OBJ_SIZE);
     mem_kernel_free(t->tls, TLS_SIZE);
     plat_aligned_free(t->cpu);
@@ -1658,6 +1663,14 @@ int kern_thread_state(uint32_t h) {
     lock();
     RtThread *t = h_peek(h, O_THREAD);
     int r = !t ? -1 : t->exited ? KERN_THREAD_EXITED : t->wkind;
+    unlock();
+    return r;
+}
+
+uint32_t kern_thread_target(uint32_t handle) {
+    lock();
+    RtThread *t = h_get(handle, O_THREAD);
+    uint32_t r = t && t->target ? t->target->handle : 0;
     unlock();
     return r;
 }
