@@ -283,6 +283,14 @@ static void load_module(Mod *m, const char *dir, const RtLayoutEntry *lay) {
                  (unsigned long long)size, (unsigned long long)lay->size);
     if (!plat_mem_commit(lay->base, size))
         rt_fatal("loader: cannot commit %s at %#llx", lay->name, (unsigned long long)lay->base);
+    // The tail page. The SDK's nn::ro::detail::GetExceptionInfo, symbolising a backtrace for the game's abort message,
+    // reads 4 bytes past the end of a module's image, which Horizon's address space tolerates and ours faulted on,
+    // hiding the message. A zero page after every image; main's is the patch page (patches.c), committed either way.
+    int next_is_module = 0;
+    for (int i = 0; i < rt_layout_count; i++)
+        if (rt_layout[i].base == lay->base + size) next_is_module = 1;
+    if (!next_is_module && !plat_mem_commit(lay->base + size, 0x1000))
+        rt_fatal("loader: cannot commit the page after %s", lay->name);
     for (int i = 0; i < 3; i++) {
         if ((uint64_t)seg[i].mem_off + seg[i].size > size) rt_fatal("loader: %s segment %d exceeds the image", lay->name, i);
         nso_segment(raw, &seg[i], (uint8_t *)(uintptr_t)(lay->base + seg[i].mem_off), lay->name, i);

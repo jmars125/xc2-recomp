@@ -20,15 +20,22 @@
 #define PAGE 0x1000ull
 #define GiB (1ull << 30)
 #define LOW_SEARCH_FROM 0x100000000ull
-#define LOW_SIZE (6 * GiB)
+#define LOW_SIZE (9 * GiB)
 #define STACK_OFF 0x10000000ull
 #define STACK_SIZE 0x10000000ull
 #define HEAP_OFF (STACK_OFF + STACK_SIZE + 0x10000000ull)
-#define HEAP_CAP (4 * GiB)
+// The guest's own limits on the heap are all 64-bit: nninitStartup asks for TotalMemorySize - UsedMemorySize with
+// nn::os::SetMemoryHeapSize(u64), nn::init::InitializeAllocator and mtl::MemManager::create take unsigned long, and
+// ml::WorkRootParam holds u64 region sizes. What is 32-bit is the sum of grlib::CGLibMemHandle::setup's regions
+// (host.h RES_BUDGET_MAX). So the cap only has to hold the pool at the largest budget, and the block has to hold the cap
+// after HEAP_OFF.
+#define HEAP_CAP (8 * GiB)
 #define ALIAS_SIZE (64 * GiB)
 #define ALIAS_ALIGN (4 * GiB)
 #define ALIAS_PAGES (ALIAS_SIZE / PAGE)
 #define DEFAULT_POOL 0xCD500000ull       // retail application pool
+_Static_assert(HEAP_OFF + HEAP_CAP <= LOW_SIZE, "the heap fits the stack and heap block");
+_Static_assert(DEFAULT_POOL + RES_BUDGET_MAX - RES_BUDGET_GAME <= HEAP_CAP, "the heap holds the pool at the largest budget");
 #define SYSTEM_RESOURCE_BUDGET (32ull << 20)
 #define MAX_STACK_MAPS 4096
 #define REEXEC_LIMIT 20
@@ -212,7 +219,8 @@ void mem_init(void) {
     if (L.pool) return;
     // Fixed window: modules, kernel region, host-function addresses.
     mods_lo = MOD_MAIN_BASE;
-    mods_hi = align_up(rt_layout[rt_layout_count - 1].base + rt_layout[rt_layout_count - 1].size, 0x10000);
+    // One page more than the last image: loader.c load_module maps a page after each image (the tail page).
+    mods_hi = align_up(rt_layout[rt_layout_count - 1].base + rt_layout[rt_layout_count - 1].size + PAGE, 0x10000);
     if (mods_hi > RT_KERNEL_BASE) rt_fatal("memory: modules end at %#llx, inside the kernel region",
                                            (unsigned long long)mods_hi);
     if (!reserve_at(mods_lo, mods_hi - mods_lo, 0)) reexec_or_fail("the module window");
@@ -223,7 +231,7 @@ void mem_init(void) {
     uint64_t low = 0, alias = 0;
     for (uint64_t at = LOW_SEARCH_FROM; at + LOW_SIZE <= mods_lo && !low; at += GiB)
         if (reserve_at(at, LOW_SIZE, 1)) low = at;
-    if (!low) reexec_or_fail("a 6 GiB stack and heap block below 2^39");
+    if (!low) reexec_or_fail("a 9 GiB stack and heap block below 2^39");
     for (uint64_t at = align_up(low + LOW_SIZE, ALIAS_ALIGN); at + ALIAS_SIZE <= mods_lo && !alias; at += ALIAS_ALIGN)
         if (reserve_at(at, ALIAS_SIZE, 1)) alias = at;
     if (!alias) reexec_or_fail("a 64 GiB alias region below 2^39");

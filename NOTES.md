@@ -132,6 +132,16 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   Inferred, not measured: which menus use filters, and whether draw info +0x150 is the camera's projection (its
   product with +0x110 is what `createWorldMatrixUniform` multiplies, and the layer's own perspective in the same
   function follows +0x110, so +0x110 is the view).
+- Render memory at large output sizes (2026-11-04; `tools/size_sites_xc2.py`, read in the disassembly of 1.0.0 and 3.0.1,
+  not yet run in the game). What limits GLIBPXL, from the outside in: the application pool (`memory.c` `DEFAULT_POOL`,
+  grown by `res_heap_extra_bytes`); the heap (`HEAP_CAP`, was 4 GiB, now 8 GiB in a 9 GiB `LOW_SIZE` block: nothing in the
+  guest holds the heap in 32 bits, `nninitStartup` and `mtl::MemManager::create` take u64); the graphic region, which
+  nothing grew before: `nnMain` writes three region sizes into `ml::WorkRootParam` (product 0x8c400000, debug 0xd800000,
+  graphic 0x20000000, 3.0.1 main+0x6421b4) and `ml::WorkRootMem::initialize` mallocs them, GLIBTOP's parent being the
+  512 MiB one, so any budget past about 400 MiB failed at GLIBTOP's creation however large the heap was. The set size now
+  loads that size from page +0x80. Last, the u32 sum of `grlib::CGLibMemHandle::setup`, hence `RES_BUDGET_MAX` 3584 MiB.
+  The abort handler: `nn::ro::detail::GetExceptionInfo` reads 4 bytes past a module's image, so `loader.c load_module`
+  commits a zero page after each one, to let the game's own abort message through.
 - 60 fps, 3.0.1 (2026-11-02; on by default, `XC2_FPS_LIMIT=30` or `XC2_FPS60=0` for the shipping 30):
   - Frame pacing is a spin in the main thread, main+0x6aafd8: it reads the system tick until the time since the frame
     began exceeds period * interval * 0.997 (constant main+0x9b558c). The period comes from virtual +0xd0 of the object

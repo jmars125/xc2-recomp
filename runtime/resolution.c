@@ -13,7 +13,9 @@
 //           still fits and 5120x1440 does not (the game then has no region and aborts in its first allocation). The
 //           set's third site loads that constant from +0x78, where res_init stores a budget grown with the pixel
 //           count, and res_heap_extra_bytes grows the application pool by the same bytes, so the heap the game asks
-//           for (nninitStartup: TotalMemorySize - UsedMemorySize, memory.c mem_info) holds the larger region.
+//           for (nninitStartup: TotalMemorySize - UsedMemorySize, memory.c mem_info) holds the larger region. GLIBTOP's
+//           parent is the graphic region, which nnMain sizes with a constant 512 MiB in ml::WorkRootParam; the set's
+//           fourth site loads that from +0x80, where res_init stores 512 MiB plus what the budget grew by.
 //   scale   The game's dynamic resolution (lib_nx.ini red_sclX / red_sclY / red_Auto) ends in
 //           ml::DrPixlPostParm::isReductionBuffer, which multiplies the scale pair by 100.0 and draws the scene at
 //           width * percent / 100. The set loads both percents from +0x70, where res_init stores 100 when the set
@@ -58,9 +60,10 @@
 #define PAGE_UI_ORIGIN 0xa8 // f32 x 2, where that rectangle starts in the picture, loaded as one u64 too
 #define PAGE_UI_FACTOR 0xb0 // f32 x 4, render size / rectangle size in x and y, then 1, 1: a vector for the projection
 #define PAGE_UI_RENDER 0xc0 // f32 x 2, the render size: the viewport the interface's last step restores
-#define PXL_BUDGET 0x16a00000ull        // the game's GLIBPXL region: 362 MiB in 3.0.1 (1.0.0 has 342 MiB)
+#define PAGE_GRAPHIC 0x80   // u32, the graphic region (the set size's fourth site); +0x84 .. +0x9f are this file's, +0xa0 and up the interface's
+#define PXL_BUDGET RES_BUDGET_GAME      // the game's GLIBPXL region: 362 MiB in 3.0.1 (1.0.0 has 342 MiB)
 #define BUDGET_PIXELS (3840ull * 1080)  // the largest picture that ran within the game's budget
-#define EXTRA_CAP 0x35000000ull         // the pool may grow this much before the game's heap would pass memory.c HEAP_CAP (4 GiB)
+#define GRAPHIC_REGION 0x20000000ull    // nnMain's ml::WorkRootParam: the parent region of GLIBTOP
 #define ASPECT_EPS 0.005f   // 1366x768 counts as 16:9; 16:10 and 21:9 do not
 
 static struct {
@@ -74,7 +77,7 @@ static struct {
     int fixed;         // the set scale is on: the scene is drawn at percent of the render size, the game's dynamic resolution off
     int percent;       // that percent
     uint64_t budget;   // the pixel memory budget the set size stores: the game's, grown with the pixel count past BUDGET_PIXELS
-    uint64_t extra;    // what the application pool grows by for it (res_heap_extra_bytes), at most EXTRA_CAP
+    uint64_t extra;    // what the application pool and the graphic region grow by for it (res_heap_extra_bytes)
 } R;
 
 static int parse(const char *s, unsigned *w, unsigned *h) {
@@ -99,13 +102,13 @@ static void decide(void) {
     R.budget = PXL_BUDGET;
     if (pixels > BUDGET_PIXELS)   // the targets grow with the pixels: the budget in the same proportion, whole MiB
         R.budget = (PXL_BUDGET * pixels / BUDGET_PIXELS + (1u << 20) - 1) & ~((1ull << 20) - 1);
-    R.extra = R.budget - PXL_BUDGET;
-    if (R.extra > EXTRA_CAP) {
-        R.extra = EXTRA_CAP;
-        rt_log("resolution: %ux%u needs a pixel memory budget of %llu MiB; the application pool grows by %llu MiB only, "
-               "the most the game's heap can take (memory.c HEAP_CAP)", R.ow, R.oh, (unsigned long long)(R.budget >> 20),
-               (unsigned long long)(R.extra >> 20));
+    if (R.budget > RES_BUDGET_MAX) {   // past this the u32 sums of grlib::CGLibMemHandle::setup would wrap
+        rt_log("resolution: %ux%u needs a pixel memory budget of %llu MiB; it stops at %llu MiB, the most the game's "
+               "32-bit region sizes hold", R.ow, R.oh, (unsigned long long)(R.budget >> 20),
+               (unsigned long long)(RES_BUDGET_MAX >> 20));
+        R.budget = RES_BUDGET_MAX;
     }
+    R.extra = R.budget - PXL_BUDGET;
     const char *s = cfg_value("XC2_RENDER_SCALE");
     int pct = s ? atoi(s) : 0;
     if (pct >= 25) {
@@ -180,9 +183,11 @@ void res_init(void) {
     } else {
         uint32_t w = R.ow, h = R.oh;
         uint64_t budget = R.budget << 32;   // the movk after the patched movz fills the low half
+        uint32_t graphic = (uint32_t)(GRAPHIC_REGION + R.extra);
         memcpy(page + PAGE_WIDTH, &w, sizeof w);
         memcpy(page + PAGE_HEIGHT, &h, sizeof h);
         memcpy(page + PAGE_BUDGET, &budget, sizeof budget);
+        memcpy(page + PAGE_GRAPHIC, &graphic, sizeof graphic);
         int wanted = rt_patch_enabled(set), on = wanted && (R.ow != GAME_W || R.oh != GAME_H);
         rt_patch_switch(set, on);
         R.size = on;

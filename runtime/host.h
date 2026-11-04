@@ -247,6 +247,10 @@ void movie_tick(Cpu *c);                                   // at every present, 
                                                            // decoded movie frames over when due, signals their events
 int movie_playing(void);                                   // a pre-rendered movie plays (ov_movie.c)
 // ---- game resolution (resolution.c): XC2_OUTPUT_RES shapes the 3D view through the patch set aspect
+// The game's GLIBPXL region, and the most it may grow to: grlib::CGLibMemHandle::setup sums its regions in 32 bits, and
+// they total about 100 MiB besides GLIBPXL. memory.c HEAP_CAP holds the application pool grown by the difference.
+#define RES_BUDGET_GAME 0x16a00000ull
+#define RES_BUDGET_MAX 0xE0000000ull
 uint64_t res_heap_extra_bytes(void);                       // added to the application pool (mem_init), 2 MiB steps
 uint64_t res_heap_extra_kib(void);                         // added to the HeapDef texture heap and its parent; 0 = none
 int res_heapdef_build(const void *in, size_t n, void **out, size_t *out_n);   // the HeapDef table (.byml.zs) with
