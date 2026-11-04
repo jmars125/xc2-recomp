@@ -1023,13 +1023,18 @@ static VkDescriptorBufferInfo ssbo_info(VkExec *ex, int st, const GfxShaderRes *
 // XC2's G-buffer and terrain shaders sample targets of the pass that renders them, at their own pixel, after earlier
 // draws of the pass wrote them (albedo, normals, R32F linear depth). Maxwell reads see those writes; in Vulkan the read
 // is undefined without a barrier, and on the RX 9070 it showed as dark screen-aligned blocks on the island ground
-// and hid Tulin's sage spirit. Before a draw whose fragment shader samples an attachment of
-// the open pass that a draw or clear of the pass wrote since the pass began or the last barrier:
+// and hid Tulin's sage spirit. Before a draw whose fragment shader samples an attachment of the open pass:
 // - VK_FEEDBACK_LAYOUT: the image is learned (VkTexImage.fb_learned; it has the feedback usage since its creation), the
 //   pass restarts once with it in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT, and from then on its passes attach it in that
-//   layout, its descriptors carry that layout, the draws that sample it use a pipeline with the feedback flag
-//   (VkPipeState.feedback) and a by-region barrier precedes such a draw.
-// - VK_FEEDBACK_RESTART: the pass ends and restarts behind the full barrier (vk_exec_pass_begin).
+//   layout, its descriptors carry that layout and the draws that sample it use a pipeline with the feedback flag
+//   (VkPipeState.feedback). This does not wait for a write by a draw: every pass attaches with STORE, which the attachment
+//   feedback rules (VUID-vkCmdDraw-None-10795 to 10797, 09000 to 09002 in older layers) count as a write, so the first
+//   sample in a pass already needs the layout and the flag. A by-region barrier precedes a draw only when a draw or clear
+//   wrote the attachment since the pass began or the last barrier. An image without the feedback usage (block views)
+//   cannot be learned and is treated as in VK_FEEDBACK_RESTART.
+// - VK_FEEDBACK_RESTART: when a draw or clear wrote the attachment, the pass ends and restarts behind the full barrier
+//   (vk_exec_pass_begin). That orders the writes but is not a valid feedback loop: the device has no feedback layout.
+
 static int in_fbl(const VkExec *ex, VkImage img) {
     for (int i = 0; i < ex->nfbl; i++)
         if (ex->fbl_img[i] == img) return 1;
@@ -1083,14 +1088,18 @@ static SubRange sampled_sub(uint64_t h) {   // texture lock held
     return img ? sub_of(img, &v, hv) : (SubRange){0};
 }
 
-// Attachments of the open pass the fragment shader fs samples; kept while the shader, the texture bindings and the
-// pass stay the same.
+// Attachments of the open pass the fragment shader fs samples; kept while the shader, the texture bindings, the slots'
+// resolution and the pass stay the same. The slots count because vk_texture_register points a slot at another image
+// without a bind op; a generation change costs a rescan, which the per-handle memo above answers without a lookup when
+// the handles' own slots did not change. XC2_TEX_MEMO=0 and =check always rescan.
 static uint32_t feedback_scan(VkExec *ex, const GfxShader *fs) {
-    if (ex->fb_fs == fs && ex->fb_serial == ex->tex_serial && ex->fb_pass == ex->pass_serial) return ex->fb_sampled;
+    uint32_t gen = vk_texture_slots_gen();   // before any lookup
+    int memo = td_mode(), locked = 0;
+    if (memo == 1 && ex->fb_fs == fs && ex->fb_gen == gen && ex->fb_serial == ex->tex_serial && ex->fb_pass == ex->pass_serial)
+        return ex->fb_sampled;
     const GfxShaderRes *res;
     int n = gfx_shader_resources(fs, GFX_RES_TEX, &res);
-    uint32_t m = 0, gen = vk_texture_slots_gen();   // before any lookup
-    int memo = td_mode(), locked = 0;
+    uint32_t m = 0;
     for (int r = 0; r < n; r++)
         for (int k = 0; k < (res[r].count ? res[r].count : 1); k++) {
             int slot = res[r].slot + k;
@@ -1115,7 +1124,7 @@ static uint32_t feedback_scan(VkExec *ex, const GfxShader *fs) {
             else f->h = 0;
         }
     if (locked) vk_texture_unlock();
-    ex->fb_fs = fs, ex->fb_serial = ex->tex_serial, ex->fb_pass = ex->pass_serial, ex->fb_sampled = m;
+    ex->fb_fs = fs, ex->fb_gen = gen, ex->fb_serial = ex->tex_serial, ex->fb_pass = ex->pass_serial, ex->fb_sampled = m;
     return m;
 }
 
@@ -1125,14 +1134,20 @@ static uint32_t feedback_prepare(VkExec *ex, const GfxShader *fs) {
     int mode = vk_ctx()->feedback;
     if (mode == VK_FEEDBACK_OFF || !fs || !ex->in_pass) return 0;
     uint32_t m = feedback_scan(ex, fs);
+    if (!m) return 0;   // the common draw: no overlap, nothing to learn, no barrier
     uint32_t d = m & ex->fb_dirty;
     if (d) vk_exec_frame.fb_draws++;
-    if (d & ~(mode == VK_FEEDBACK_LAYOUT ? ex->fbl_mask : 0)) {
-        if (mode == VK_FEEDBACK_LAYOUT)
-            for (uint32_t i = 0; i < 9; i++) {
-                const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
-                if ((d >> i & 1) && t->img && t->img->fb_usage) ((VkTexImage *)t->img)->fb_learned = 1;
-            }
+    int restart = (d & ~(mode == VK_FEEDBACK_LAYOUT ? ex->fbl_mask : 0)) != 0;
+    if (mode == VK_FEEDBACK_LAYOUT) {
+        // Written or not: the pass's STORE counts (see above). A target without the feedback usage stays out of the mask,
+        // and only a write restarts for it, so a draw that keeps sampling one does not restart every time.
+        uint32_t miss = m & ~ex->fbl_mask;
+        for (uint32_t i = 0; miss && i < 9; i++) {
+            const VkExecTarget *t = i < 8 ? &ex->color[i] : &ex->depth;
+            if ((miss >> i & 1) && t->img && t->img->fb_usage) ((VkTexImage *)t->img)->fb_learned = 1, restart = 1;
+        }
+    }
+    if (restart) {
         vk_exec_pass_end(ex);
         vk_exec_pass_begin(ex);   // learned targets now in the feedback layout; the full barrier cleared fb_dirty
         vk_exec_frame.fb_restarts++;

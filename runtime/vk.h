@@ -34,8 +34,8 @@ typedef struct VkCtx {
         has_conditional_rendering, has_transform_feedback, has_provoking_vertex, has_device_fault, has_memory_budget,
         has_robustness2, has_buffer_device_address, has_fragment_shader_interlock, has_buffer_marker,
         has_astc_ldr;                       // textureCompressionASTC_LDR (enabled when reported)
-    // Feedback loops (maxwell.md 1.9, vk_exec_draw.c feedback_prepare): a draw samples a target of its open pass that
-    // an earlier draw of the pass wrote. XC2_FEEDBACK=0: VK_FEEDBACK_OFF (sampled in GENERAL without a barrier, the
+    // Feedback loops (maxwell.md 1.9, vk_exec_draw.c feedback_prepare): a draw samples a target of its open pass.
+    // XC2_FEEDBACK=0: VK_FEEDBACK_OFF (sampled in GENERAL without a barrier, the
     // old behaviour); VK_FEEDBACK_LAYOUT with VK_EXT_attachment_feedback_loop_layout and dynamicRenderingLocalRead
     // (attachable images get feedback usage, a by-region barrier inside the pass); else (or XC2_FEEDBACK=restart)
     // VK_FEEDBACK_RESTART (the pass ends and restarts behind the full barrier).
@@ -294,7 +294,7 @@ typedef struct {
                                    // COMPATIBLE + EXTENDED_USAGE: only those views may use COLOR_ATTACHMENT)
     uint8_t swz[4];               // NVN texture swizzle selectors (nvnTextureBuilderSetSwizzle); a view swizzle replaces them
     uint8_t fb_usage;              // created with ATTACHMENT_FEEDBACK_LOOP usage (VK_FEEDBACK_LAYOUT, attachable images)
-    uint8_t fb_learned;            // a draw sampled it while it was a written attachment of the open pass: its passes
+    uint8_t fb_learned;            // a draw sampled it while it was an attachment of the open pass: its passes
                                    // attach it in ATTACHMENT_FEEDBACK_LOOP_OPTIMAL_EXT (vk_exec.c vk_exec_pass_begin)
 } VkTexImage;
 const VkTexImage *vk_texture_get(const tex_t *t);   // created and made current; NULL for BUFFER or unmapped formats

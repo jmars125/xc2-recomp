@@ -188,8 +188,9 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
     targets at the fragment's pixel; on the RX 9070 the reads returned stale data as ~16x14 px dark rectangles on the
     ground, and the sage spirit next to Link was not drawn. `vk_exec_draw.c` (feedback loops) now detects such a draw:
     with `VK_EXT_attachment_feedback_loop_layout` and `dynamicRenderingLocalRead` the target moves to the feedback
-    layout and a by-region barrier precedes the draw; without them the pass restarts behind a full barrier
-    (`XC2_FEEDBACK`). **Fixed.**
+    layout on its first sample in a pass, written or not (the pass's STORE counts as a write for VUIDs 10795 to 10797),
+    and a by-region barrier precedes the draw when the pass wrote it; without them the pass restarts behind a full
+    barrier when the pass wrote it, which orders the writes but stays outside the Vulkan rules (`XC2_FEEDBACK`). **Fixed.**
 11. **Border colours.** `vk_texture.c` `make_sampler`: custom colour only with `customBorderColorWithoutFormat`, else transparent
     black; integer formats use the float path. Confirm the RX 9070 reports the feature (grass map needs 0.5).
     **OK if supported.**
