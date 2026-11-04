@@ -70,8 +70,8 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   its inverse there and switches the set on for a shape other than 16:9, as `frame_rate.c xc2_rate_store` does for
   the 1/30 loads of `xc360`. The 16:9 frame then holds the wider view, and the present fits the frame at the output's
   shape (`gfx_present.c present_image`, `res_aspect_shape`), so `picture_fit = keep` shows a 21:9 output whole on a
-  21:9 window. The interface is laid out on the 16:9 canvas and, with the render size set on, sits in the left part of
-  the picture: it is not stretched and not centred. On a 2.1.0 `main` the finder checks its result against the mods' sites (agree
+  21:9 window. The interface is laid out on the 16:9 canvas and centred in the picture by the set `ui` (see "The
+  interface" below). On a 2.1.0 `main` the finder checks its result against the mods' sites (agree
   or disagree per site) and against the size pairs Fl4sh_ turns into 2580x1080 (0x6caff8, 0x6cb060, 0x70a634); on
   1.0.0 it verifies the pattern inside `getAspect` itself and names its callers.
   Run on 1.0.0 (2026-11-03, `build/extracted/v0`): eight sites, all camera code. `ml::DevGraphNx::getPersSys`+0x60
@@ -105,8 +105,33 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   (stderr names each site's function, the sites it left unpatched and why), `gen.py --patches`, build, and a run at
   3440x1440 with `XC2_OUTPUT_RES=3440x1440`: the 3D view must show more at the sides, not a stretched 16:9. Which of
   the three sites is the field camera and which the menus or the map is not known; run 2.1.0 first, where the mods'
-  sites are the check. Then the interface: the `--sizes` INFO lines list where 1280/720 (the canvas, `ml::WorkRoot`)
-  and 1920/1080 are used together. `render_scale` has no effect (the scene sites are not found); the menu row says so.
+  sites are the check. `render_scale` has no effect (the scene sites are not found); the menu row says so.
+  The interface (2026-11-04, read in the 1.0.0 disassembly, `tools/ui_sites_xc2.py`; not yet run in the game).
+  `layer::LayerShdManager::beginShader` takes the render size from the draw info (+0x550 / +0x554) and computes one
+  scale, min(width / 1280, height / 720) (+0x558), and the uniform factors `x_ndc = x * 2 * scale - 1`, with x kept as
+  canvas pixel / screen width; the viewport covers the target from (0, 0). So at 3840x1080 canvas x falls on pixel
+  1.5 * x: the canvas fills x 0..1920, in proportion, from the left edge, which is the defect measured on the title
+  screen ("Press any button", canvas centre, at 25%; "Ver. 3.0.1" at 47%, 1203 / 1280 * 1920 / 3840). Fl4sh_'s note on his
+  2.1.0 mod is the same effect. The set `ui` (15 sites, the functions are identical in 1.0.0 and 3.0.1) gives
+  beginShader the 16:9 rectangle (+0xa0 / +0xa4 of the patch page, 1920x1080 here) in place of the render size, so every
+  derived value is that of a true 16:9 screen, the state the 1080p and 1440p mods run in, and adds the rectangle's
+  origin (+0xa8 / +0xac) to the viewports of `beginShader`, `resetViewPort`, `setViewPort` and `setShaderMaskMode`.
+  `resetViewPort` always sets the rectangle (a filter or memory object rebinds the main target between objects and that
+  sets the whole target), `endShader` restores the whole picture (+0xc0 / +0xc4). `gf::util::getScreenPos`
+  (name plates, damage numbers) and the projection behind `createWorldMatrixUniform` multiply by render size / rectangle
+  size (+0xb0 ...), since the camera's NDC spans the picture; a name plate beyond the rectangle is clipped by the
+  viewport's scissor. Slots +0xa0 .. +0xc7 are this set's, +0x80 .. +0x9f the effects work's. A shape narrower than 16:9
+  (16:10) gets the rectangle in y the same way. `XC2_UI_CENTER=0` keeps the corner. Runtime: `resolution.c ui_init`.
+  Build: `ui_sites_xc2.py main >> patches-upd.txt` after the size set; `gen.py --patches` accepts the table (106 sites,
+  3.0.1, no mismatched word), and the replacement words were run in Unicorn on sample values.
+  What follows from it: the interface and everything it draws, movies and fades through the layer included, stop at the
+  rectangle, so a 16:9 movie is centred and the bars show whatever the main target holds (black if it is cleared, the
+  3D scene during a menu or a fade). A `LayerObjTopFilter` blur still samples the target through uniforms that take
+  the rectangle for the whole target, so a blurred backdrop would look squeezed; not fixed, the shader was not read.
+  The touch mapping needs nothing: the host has no touch screen (`ov_input.c`).
+  Inferred, not measured: which menus use filters, and whether draw info +0x150 is the camera's projection (its
+  product with +0x110 is what `createWorldMatrixUniform` multiplies, and the layer's own perspective in the same
+  function follows +0x110, so +0x110 is the view).
 - 60 fps, 3.0.1 (2026-11-02; on by default, `XC2_FPS_LIMIT=30` or `XC2_FPS60=0` for the shipping 30):
   - Frame pacing is a spin in the main thread, main+0x6aafd8: it reads the system tick until the time since the frame
     began exceeds period * interval * 0.997 (constant main+0x9b558c). The period comes from virtual +0xd0 of the object

@@ -120,8 +120,8 @@
 # 4K picture and 7680x2160 a native 32:9 one. Past 3840x1080 the game's memory budget for its render targets grows with
 # the pixels, and so does the memory the game is given (up to 4 GiB in all). A shape other than 16:9 (3440x1440 for
 # 21:9) also lays the 3D view out for it when the build has the aspect patch set (tools/aspect_sites_xc2.py); the
-# interface stays laid out for 16:9 and is placed in the left 16:9 part of a wider picture. Without the sets the
-# picture stays 1280x720 at 16:9 and picture_fit decides the bars. Read at start.
+# interface stays laid out for 16:9 and is centred in the picture when the build has the ui patch set
+# (tools/ui_sites_xc2.py). Without the sets the picture stays 1280x720 at 16:9 and picture_fit decides the bars. Read at start.
 # output_res = 1920x1080
 # The size patch set: 1 (default) draws the picture at output_res, 0 keeps the game's own 1280x720 whatever output_res
 # says (its shape still fits the window). Read at start.
@@ -129,6 +129,9 @@
 # The aspect patch set: 1 (default) widens the 3D view for an output_res of another shape, 0 keeps it 16:9 with the
 # bars of picture_fit. Read at start.
 # aspect = 1
+# The ui patch set: 1 (default) centres the 16:9 interface in a picture of another shape, 0 leaves it at the corner.
+# Read at start.
+# ui_center = 1
 # 3D render scale: game (the game's own dynamic resolution, which scales the scene below the render size by its GPU
 # load) or a percentage of the render size from 25 to 100 when this build has the scale patch set
 # (tools/size_sites_xc2.py). With an output_res other than 1280x720 the scale is fixed at 100 unless a percentage is

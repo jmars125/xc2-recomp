@@ -94,7 +94,8 @@ Every guest thread is a host thread. XC2 assumes Horizon's scheduler: three appl
   `aspect` (`tools/aspect_sites_xc2.py`, `recomp/patches-upd.txt`) replaces the aspect the game computes from its
   render size (width / height, at the sites the 2.1.0 community mods patch) with a load from the patch page, where
   `resolution.c` stores the shape of `output_res`, so the 3D view is laid out for an ultrawide screen inside the
-  16:9 frame and the present shows the frame at that shape; the interface stays on the 16:9 canvas. `render_scale`
+  16:9 frame and the present shows the frame at that shape. The interface stays on its 16:9 canvas; the patch set
+  `ui` (`tools/ui_sites_xc2.py`) has it draw in the 16:9 rectangle centred in the picture. `render_scale`
   has no effect until the scene sites are found. When the window is larger than the picture, `vk_fsr.c` runs AMD
   FSR 1 (EASU, RCAS) on the present.
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.

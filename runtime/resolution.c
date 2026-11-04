@@ -1,13 +1,13 @@
 // Game resolution: the size XC2 draws its picture at and the shape of that picture, wider or narrower than the
-// shipped 16:9 (21:9 3440x1440, 32:9 5120x1440 or 7680x2160, the Steam Deck's 16:10). Three patch sets of the game's
-// code read the patch page (tools/size_sites_xc2.py and tools/aspect_sites_xc2.py -> recomp/patches-upd.txt), the
-// precedent being the 60 fps set, whose patched loads of the 1/30 constant read what frame_rate.c xc2_rate_store
+// shipped 16:9 (21:9 3440x1440, 32:9 5120x1440 or 7680x2160, the Steam Deck's 16:10). Four patch sets of the game's
+// code read the patch page (tools/size_sites_xc2.py, tools/aspect_sites_xc2.py and tools/ui_sites_xc2.py ->
+// recomp/patches-upd.txt), the precedent being the 60 fps set, whose patched loads of the 1/30 constant read what frame_rate.c xc2_rate_store
 // writes:
 //   size    XC2's display builds its two window textures at 1280x720 (grlib::CGLibDisplay::setup, two movz; the
 //           community 1080p and 1440p mods overwrite the immediates). The set loads them from +0x68 / +0x6c, where
 //           res_init stores XC2_OUTPUT_RES (default 1920x1080), and is on when that is not 1280x720: the game then draws
-//           its picture at the output's own size and shape, the viewport and the render size the camera code divides
-//           follow the textures, and the interface is laid out on its 1280x720 canvas and scaled with them. The
+//           its picture at the output's own size and shape, and the viewport and the render size the camera code
+//           divides follow the textures. The
 //           render targets live in a region of the game's heap with a constant budget, GLIBPXL, 362 MiB in 3.0.1
 //           (grlib::CGLibManager::deviceInit, one movz); the targets of 1280x720 take about 80 MiB of it, 3840x1080
 //           still fits and 5120x1440 does not (the game then has no region and aborts in its first allocation). The
@@ -25,6 +25,11 @@
 //           shape other than 16:9. The camera constructors take the root canvas's 16:9 for their aspect, not the
 //           render size, so a wide picture needs this set as well as the set size. The 2.1.0 ultrawide mods by Fl4sh_
 //           and theboy181 overwrite the same quotient and leave the frame to the emulator's "stretch to window".
+//   ui      XC2 lays its interface out on a 1280x720 canvas and draws it at one scale, the smaller of width / 1280 and
+//           height / 720, from the corner of the target (layer::LayerShdManager::beginShader), so on a wider picture
+//           it keeps its proportions in the left part. The set shows it the 16:9 rectangle centred in the picture as
+//           its screen (+0xa0 .. +0xc4, tools/ui_sites_xc2.py), on a shape other than 16:9 with the set size on. A
+//           full-screen layer element (a movie, a fade, a menu backdrop) then covers the rectangle, not the picture.
 // The present shows the picture at the output's shape (gfx_present.c present_image through res_aspect_shape), and
 // XC2_PICTURE_FIT decides the bars when the window's shape differs. Without the sets (a build whose patch table was
 // made before the finders ran, or another game version) the picture stays the game's own 1280x720 at 16:9, and one
@@ -49,6 +54,10 @@
 #define PAGE_HEIGHT 0x6c    // u32 render height
 #define PAGE_SCALE 0x70     // f32 render scale in percent, the set scale's loads
 #define PAGE_BUDGET 0x78    // u64, the pixel memory budget in its top 32 bits (the set size's third site)
+#define PAGE_UI_SIZE 0xa0   // u32 x 2, the interface's rectangle: width and height, the set ui's loads (tools/ui_sites_xc2.py)
+#define PAGE_UI_ORIGIN 0xa8 // f32 x 2, where that rectangle starts in the picture, loaded as one u64 too
+#define PAGE_UI_FACTOR 0xb0 // f32 x 4, render size / rectangle size in x and y, then 1, 1: a vector for the projection
+#define PAGE_UI_RENDER 0xc0 // f32 x 2, the render size: the viewport the interface's last step restores
 #define PXL_BUDGET 0x16a00000ull        // the game's GLIBPXL region: 362 MiB in 3.0.1 (1.0.0 has 342 MiB)
 #define BUDGET_PIXELS (3840ull * 1080)  // the largest picture that ran within the game's budget
 #define EXTRA_CAP 0x35000000ull         // the pool may grow this much before the game's heap would pass memory.c HEAP_CAP (4 GiB)
@@ -60,6 +69,7 @@ static struct {
     unsigned rw, rh;   // the render size: ow x oh when the set size is on, else the game's 1280x720
     int size;          // the set size is on
     int aspect;        // the set aspect is on: the 3D view is laid out for ow:oh
+    int ui;            // the set ui is on: the interface is drawn in the centred 16:9 rectangle of the picture
     int scale;         // XC2_RENDER_SCALE in percent, 0 for game
     int fixed;         // the set scale is on: the scene is drawn at percent of the render size, the game's dynamic resolution off
     int percent;       // that percent
@@ -122,10 +132,42 @@ int res_heapdef_build(const void *in, size_t n, void **out, size_t *out_n) {
 }
 void res_heapdef_served(void) {}
 
+// The set ui: the largest even 16:9 rectangle in the render size, centred, stored where the set reads it. Off at the
+// game's own size and for a render size within ASPECT_EPS of 16:9 (1366x768), which the interface fills as it is.
+static void ui_init(uint8_t *page) {
+    int set = rt_patch_set("ui");
+    if (set < 0 || !page) {
+        if (R.size)
+            rt_log("resolution: this %s build has no ui patch set (tools/ui_sites_xc2.py): on a shape other than 16:9 the "
+                   "interface stays at its corner of the picture", rt_game_name);
+        return;
+    }
+    float shape = (float)R.rw / (float)R.rh - 16.0f / 9;
+    uint32_t size[2] = {R.rw, R.rh};
+    if (shape > 0) size[0] = (R.rh * 16 / 9 + 1) & ~1u;
+    else size[1] = (R.rw * 9 / 16 + 1) & ~1u;
+    float origin[2] = {(float)(R.rw - size[0]) / 2, (float)(R.rh - size[1]) / 2};
+    float factor[4] = {(float)R.rw / (float)size[0], (float)R.rh / (float)size[1], 1, 1};
+    float render[2] = {(float)R.rw, (float)R.rh};
+    memcpy(page + PAGE_UI_SIZE, size, sizeof size);
+    memcpy(page + PAGE_UI_ORIGIN, origin, sizeof origin);
+    memcpy(page + PAGE_UI_FACTOR, factor, sizeof factor);
+    memcpy(page + PAGE_UI_RENDER, render, sizeof render);
+    int wanted = rt_patch_enabled(set), on = wanted && R.size && (shape > ASPECT_EPS || shape < -ASPECT_EPS);
+    rt_patch_switch(set, on);
+    R.ui = on;
+    if (on)
+        rt_log("resolution: interface in the centred %ux%u of the %ux%u picture, from (%u, %u) (set ui); full-screen "
+               "layer elements such as movies and fades cover that rectangle", size[0], size[1], R.rw, R.rh,
+               (R.rw - size[0]) / 2, (R.rh - size[1]) / 2);
+    else if (!wanted)
+        rt_log("resolution: XC2_UI_CENTER=0: on a shape other than 16:9 the interface stays at its corner of the picture");
+}
+
 // Stores the render size, the render scale and the output's aspect where the sets read them and switches each set
 // on or off; before the guest starts, so plain stores. patches.c switched each set on from its environment switch
-// (XC2_RENDER_RES, XC2_FIXED_SCALE, XC2_ASPECT; default 1): 0 keeps the game's own size, dynamic resolution or 16:9
-// view whatever the output says.
+// (XC2_RENDER_RES, XC2_FIXED_SCALE, XC2_ASPECT, XC2_UI_CENTER; default 1): 0 keeps the game's own size, dynamic
+// resolution, 16:9 view or interface placement whatever the output says.
 void res_init(void) {
     decide();
     uint8_t *page = rt_patch_page();
@@ -174,6 +216,7 @@ void res_init(void) {
             rt_log("resolution: render scale: the game's own dynamic resolution (%s)",
                    wanted ? "XC2_RENDER_SCALE=game at the game's own size" : "XC2_FIXED_SCALE=0");
     }
+    ui_init(page);
     set = rt_patch_set("aspect");
     if (set < 0 || !page) {
         rt_log("resolution: this %s build has no aspect patch set (tools/aspect_sites_xc2.py): the 3D view stays 16:9 "
@@ -188,7 +231,8 @@ void res_init(void) {
     R.aspect = on;
     if (on)
         rt_log("resolution: 3D view laid out for %ux%u (aspect %.4f against 16:9 %.4f); the interface stays on the "
-               "16:9 canvas, in the left part of the picture", R.ow, R.oh, (double)aspect, 16.0 / 9);
+               "16:9 canvas, %s", R.ow, R.oh, (double)aspect, 16.0 / 9,
+               R.ui ? "centred in the picture" : "from the corner of the picture");
     else
         rt_log("resolution: %ux%u, the 3D view stays 16:9 (%s)", R.ow, R.oh, wanted ? "the output is 16:9" : "XC2_ASPECT=0");
 }
@@ -212,6 +256,6 @@ int res_aspect_shape(unsigned shape[2]) {
 }
 
 // The interface's horizontal scale on a frame wider than 16:9: 1 for XC2. XCX's fit (nvn_api_cmd.c, in the history)
-// narrowed the interface's uniform blocks, viewports and scissors at XCX's own sites; XC2's are not found, so its
-// interface stays on its 16:9 canvas, in the left part of a wider picture. The API stays so that the fit returns here once the sites are known.
+// narrowed the interface's uniform blocks, viewports and scissors at XCX's own sites; XC2's game code places its
+// interface itself through the set ui (ui_init), so nothing in the command stream changes.
 float res_ui_fit(void) { return 1; }

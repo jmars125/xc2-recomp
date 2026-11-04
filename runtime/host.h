@@ -252,7 +252,7 @@ uint64_t res_heap_extra_kib(void);                         // added to the HeapD
 int res_heapdef_build(const void *in, size_t n, void **out, size_t *out_n);   // the HeapDef table (.byml.zs) with
                                                            // the grown heaps, malloc'd; 0 = cannot (logged)
 void res_heapdef_served(void);                             // romfs.c serves the grown table
-float res_ui_fit(void);                                    // horizontal scale of the interface: 1, XC2's sites are not found
+float res_ui_fit(void);                                    // horizontal scale of the interface: 1, the set ui places it
 void res_init(void);                                       // after rt_patches_init: the patch page and the set aspect
 void res_sizes(unsigned out[2], unsigned scene[2]);      // the canvas and scene sizes: XC2's own (the overlay)
 int res_aspect_shape(unsigned shape[2]);                   // 1 and the shape the present shows the 16:9 frame in
