@@ -1,13 +1,14 @@
 // Game resolution: the shape of the picture, wider or narrower than the shipped 16:9 (21:9 3440x1440, 32:9 5120x1440,
-// the Steam Deck's 16:10). XC2 draws its picture at its own size and lays its camera out for 16:9: the projection
-// reads the f32 constant 16/9, and where the code divides the other way, 9/16. The patch set "aspect"
-// (tools/aspect_sites_xc2.py -> recomp/patches-upd.txt) sends every load of those two constants to the patch page,
-// +0x60 and +0x64, where res_init stores the output's own aspect ratio and its inverse, computed from the shape of
-// XC2_OUTPUT_RES (default 1920x1080; only its shape counts). The picture then holds a wider view squeezed into its
-// 16:9 frame, and the present stretches that frame to the output's shape (gfx_present.c present_image through
-// res_aspect_shape). This is how the community ultrawide cheats for emulators treat this game: the cheat rewrites the
-// aspect constant and the emulator stretches the frame to the window. The precedent in this runtime is the 60 fps set:
-// frame_rate.c xc2_rate_store writes the value the patched loads of the 1/30 constant read.
+// the Steam Deck's 16:10). XC2 draws its picture at its own size and computes its camera's aspect at run time as
+// render width / height (ml::DevGraph::getAspect, inlined at its users). The patch set "aspect"
+// (tools/aspect_sites_xc2.py -> recomp/patches-upd.txt) replaces that quotient at each site with a load from the
+// patch page, +0x60 (and +0x64 where the code divides the other way round), where res_init stores the output's own
+// aspect ratio and its inverse, computed from the shape of XC2_OUTPUT_RES (default 1920x1080; only its shape counts).
+// The picture then holds a wider view squeezed into its 16:9 frame, and the present stretches that frame to the
+// output's shape (gfx_present.c present_image through res_aspect_shape). The 2.1.0 ultrawide mods by Fl4sh_ and
+// theboy181 overwrite the same quotient and leave the frame to the emulator's "stretch to window". The precedent in
+// this runtime is the 60 fps set: frame_rate.c xc2_rate_store writes the value the patched loads of the 1/30
+// constant read.
 //
 // What is not done: the interface is laid out on the same 16:9 canvas and is stretched with the picture (res_ui_fit
 // returns 1: the sites that place XC2's interface are not found; the finder lists candidates as INFO), and the pixel
@@ -26,8 +27,8 @@
 
 #define BASE_W 1920
 #define BASE_H 1080
-#define PAGE_ASPECT 0x60    // f32 output width / height, what the set's 16/9 loads read (tools/aspect_sites_xc2.py)
-#define PAGE_INVERSE 0x64   // f32 output height / width, what its 9/16 loads read
+#define PAGE_ASPECT 0x60    // f32 output width / height, the quotient the set's sites load (tools/aspect_sites_xc2.py)
+#define PAGE_INVERSE 0x64   // f32 output height / width, for a site that divides the other way round
 #define ASPECT_EPS 0.005f   // 1366x768 counts as 16:9; 16:10 and 21:9 do not
 
 static struct {

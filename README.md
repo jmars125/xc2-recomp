@@ -55,6 +55,8 @@ XC2 Recomp builds on the projects below. What was taken from each, with its lice
 - [hactool](https://github.com/SciresM/hactool)
 - [SDL 3](https://libsdl.org), [Dear ImGui](https://github.com/ocornut/imgui), [AMD FSR 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR), [Vulkan Memory Allocator](https://github.com/GPUOpen-LibrariesAndSDKs/VulkanMemoryAllocator), [libopus](https://opus-codec.org), [libvpx](https://chromium.googlesource.com/webm/libvpx), [Zstandard](https://github.com/facebook/zstd)
 - The [60FPS mod for XC2 1.0.1](https://github.com/Fl4sh9174/Switch-Emulator-Ultrawide-FPS-Mods) by Fl4sh_ and StevensND
+- The [21:9 Ultrawide mod for XC2 2.1.0](https://github.com/Fl4sh9174/Switch-Emulator-Ultrawide-FPS-Mods) by Fl4sh_ and the [21:9 patch for 2.1.0](https://github.com/theboy181/switch-ptchtxt-mods) by theboy181, whose sites the aspect patch set follows
+- [xc2-decomp](https://github.com/Glitxhhh/xc2-decomp) by Glitxhhh, which names the game's functions
 - [Switchbrew](https://switchbrew.org) and the Switch homebrew community
 
 ## License

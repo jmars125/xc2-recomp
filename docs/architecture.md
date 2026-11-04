@@ -91,11 +91,12 @@ Every guest thread is a host thread. XC2 assumes Horizon's scheduler: three appl
 - Shaders: the Ryujinx translator 1.3.2 with MacNativeGames' patches and ours (`tools/xlate/patches/`), built with .NET 10 NativeAOT as `xc2_xlate.exe` and run as a separate process. Its SPIR-V goes to Vulkan directly. `tools/prepare_shaders.py` and `xc2.exe --prepare-shaders` translate and compile the variants of MacNativeGames' shared list ahead of play (29,587 for 1.4.3); the rest are translated on first use and cached on disk.
 - Pipelines: `VK_EXT_graphics_pipeline_library` where the driver has it. Shader stages are compiled ahead into libraries; a draw that meets a new state links them at once (fast link), and an optimised pipeline replaces the linked one when a background thread finishes it. Pipeline keys seen in play are saved and built at boot. A draw whose pipeline is not ready is skipped when one of its pass's targets was rendered in the previous frame, and waits otherwise, so one-shot passes are never lost; a full-screen draw is skipped as well rather than waiting (`XC2_PIPE_SKIP`); the stage libraries a waiting draw needs are built on idle workers in parallel (`XC2_PIPE_WAIT`). Without the extension, a missing pipeline is built on a worker and the draw waits or is skipped by the same rule.
 - Resolution. XC2 draws its picture at its own size (no size table like XC3's exists in its `main`). The patch set
-  `aspect` (`tools/aspect_sites_xc2.py`, `recomp/patches-upd.txt`) sends the loads of the game's 16/9 and 9/16
-  constants to the patch page, where `resolution.c` stores the shape of `output_res`, so the 3D view is laid out for
-  an ultrawide screen inside the 16:9 frame and the present shows the frame at that shape; the interface stays on the
-  16:9 canvas. `render_scale` has no effect until the scene sites are found. When the window is larger than the
-  picture, `vk_fsr.c` runs AMD FSR 1 (EASU, RCAS) on the present.
+  `aspect` (`tools/aspect_sites_xc2.py`, `recomp/patches-upd.txt`) replaces the aspect the game computes from its
+  render size (width / height, at the sites the 2.1.0 community mods patch) with a load from the patch page, where
+  `resolution.c` stores the shape of `output_res`, so the 3D view is laid out for an ultrawide screen inside the
+  16:9 frame and the present shows the frame at that shape; the interface stays on the 16:9 canvas. `render_scale`
+  has no effect until the scene sites are found. When the window is larger than the picture, `vk_fsr.c` runs AMD
+  FSR 1 (EASU, RCAS) on the present.
 - Occlusion queries never block the CPU; a result that is not ready counts as visible.
 - ASTC textures are uploaded as they are where the device reports `textureCompressionASTC_LDR`, and decoded by a compute shader everywhere else (`vk_astc.c`, `XC2_ASTC`). The CPU decoder (`tex_astc*.c`) is the fallback and the test oracle.
 - Draw state. A draw whose program, bound state and textures repeat reuses the previous draw's shaders and skips rebuilding its descriptor sets; descriptor sets are written through update templates (`vk_exec_draw.c`, `vk_pipeline.c`).

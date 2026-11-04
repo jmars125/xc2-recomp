@@ -53,22 +53,35 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
 - Transform feedback is not replayed (`nvn_api_cmd.c xfb_skipped`).
 - Resolution and ultrawide (2026-11-03). The game keeps its own picture size: neither 3.0.1 nor 2.1.0 holds the
   `{1920, 1080, 1280, 720}` table XC3's `resolution.c` wrote, and the XCX-address interface fit of `nvn_api_cmd.c` is
-  gone with it (in the history). What `output_res` does now is shape the 3D view: `tools/aspect_sites_xc2.py` finds the
-  loads of the f32 constants 16/9 (`0x3fe38e39`) and 9/16 (`0x3f100000`) in `main` (adrp + `ldr s`, and movz/movk +
-  `fmov s, w`) and emits the set `aspect`, whose sites read patch page +0x60 and +0x64; `resolution.c res_init` stores
-  the output's aspect and its inverse there and switches the set on for a shape other than 16:9, as `frame_rate.c
-  xc2_rate_store` does for the 1/30 loads of `xc360`. The 16:9 frame then holds the wider view, and the present fits
-  the frame at the output's shape (`gfx_present.c present_image`, `res_aspect_shape`), so `picture_fit = keep` shows
-  a 21:9 output whole on a 21:9 window. The interface is laid out on the 16:9 canvas and stretches with the picture.
-  Not done yet: the finder has not run on the real `main` (no game data on the machine the change was written on), so
-  `patches-upd.txt` has no `aspect` set and `res_init` logs that; its `--selftest` covers the encodings on a synthetic
-  image. To finish: `fps_sites_xc2.py main > patches-upd.txt`, `aspect_sites_xc2.py main >> patches-upd.txt`
-  (its stderr names each site's function and the loads it could not patch: `ldr s, <literal>` and the `fmov s, #0.5625`
-  immediate have no address register at the site), `gen.py --patches`, build, and a run at 3440x1440 with
-  `XC2_OUTPUT_RES=3440x1440`: the 3D view must show more at the sides, not a stretched 16:9. Then the interface: the
-  finder's INFO lines list where 1280/720 and 1920/1080 are used together, the candidates for the canvas size. The
-  2.1.0 build needs the finder's version gate extended (`LANDMARKS`) or `--no-gate`. `render_scale` has no effect
-  (the scene sites are not found); the menu row says so.
+  gone with it (in the history). What `output_res` does now is shape the 3D view. XC2 keeps no 16:9 constant for its
+  camera: the aspect is computed at run time as render width / height (`ml::DevGraph::getAspect` =
+  `getRenderW() / getRenderH()`, DevGraph +0x230 / +0x234, inlined at its users; the names are from Glitxhhh's
+  xc2-decomp, https://github.com/Glitxhhh/xc2-decomp, whose 1.0.0 `main` keeps its symbols; every update is stripped).
+  Both community 21:9 patches for 2.1.0 (build id `F77F1559371C0EC6D50E78774AC59D95`) overwrite that quotient in `s0`:
+  Fl4sh_'s "21:9 Ultrawide v2.1.0" pchtxt (https://github.com/Fl4sh9174/Switch-Emulator-Ultrawide-FPS-Mods) rewrites
+  three slots at each of three sites, text 0x7e3080/+8/+c (the slot between kept), 0x6cbfcc/+4/+8 and
+  0x6c2390/+4/+8, with `mov w30 ; movk w30 ; fmov s0, w30` (3440/1440), and theboy181's "21'9" pchtxt
+  (https://github.com/theboy181/switch-ptchtxt-mods) rewrites 0x7e308c alone with `fmov s0, #2.375`; so the code
+  there is `scvtf s0, w ; (one) ; scvtf s1, w ; fdiv s0, s0, s1`. `tools/aspect_sites_xc2.py` scans `main` for that
+  shape (two integers loaded from memory, converted and divided) and emits the set `aspect`: each `fdiv` alone
+  becomes `adrp x30, <page> ; ldr s<d>, [x30, #0x60]` (+0x64 for a division the other way round, emitted only when
+  one is found), x30 being dead where the function saved it in its prologue, which the mods assume as well; the
+  loads of an f32 16/9 or 9/16 constant are a secondary form. `resolution.c res_init` stores the output's aspect and
+  its inverse there and switches the set on for a shape other than 16:9, as `frame_rate.c xc2_rate_store` does for
+  the 1/30 loads of `xc360`. The 16:9 frame then holds the wider view, and the present fits the frame at the output's
+  shape (`gfx_present.c present_image`, `res_aspect_shape`), so `picture_fit = keep` shows a 21:9 output whole on a
+  21:9 window. The interface is laid out on the 16:9 canvas and stretches with the picture, as with the mods under
+  the emulators' "stretch to window". On a 2.1.0 `main` the finder checks its result against the mods' sites (agree
+  or disagree per site) and against the size pairs Fl4sh_ turns into 2580x1080 (0x6caff8, 0x6cb060, 0x70a634); on
+  1.0.0 it verifies the pattern inside `getAspect` itself and names its callers.
+  Not done yet: the finder has not run on a real `main` (no game data on the machine the change was written on), so
+  `patches-upd.txt` has no `aspect` set and `res_init` logs that; its `--selftest` covers the forms on a synthetic
+  image. To finish: `fps_sites_xc2.py main > patches-upd.txt`, `aspect_sites_xc2.py main --sizes >> patches-upd.txt`
+  (stderr names each site's function, the sites it left unpatched and why), `gen.py --patches`, build, and a run at
+  3440x1440 with `XC2_OUTPUT_RES=3440x1440`: the 3D view must show more at the sides, not a stretched 16:9. Which of
+  the three sites is the field camera and which the menus or the map is not known; run 2.1.0 first, where the mods'
+  sites are the check. Then the interface: the `--sizes` INFO lines list where 1280/720 (the canvas, `ml::WorkRoot`)
+  and 1920/1080 are used together. `render_scale` has no effect (the scene sites are not found); the menu row says so.
 - 60 fps, 3.0.1 (2026-11-02; on by default, `XC2_FPS_LIMIT=30` or `XC2_FPS60=0` for the shipping 30):
   - Frame pacing is a spin in the main thread, main+0x6aafd8: it reads the system tick until the time since the frame
     began exceeds period * interval * 0.997 (constant main+0x9b558c). The period comes from virtual +0xd0 of the object
@@ -102,6 +115,12 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   - The vsync thread (main+0x89bb08, a 60 Hz WaitSystemEvent loop) counts vsyncs at +0x278 of its object. The frame
     wait does not use it.
   - Not frame pacing: the periodic timer at main+0xec7540 is nn::hid's vibration sampler.
+  - Leads for the two values not found in 3.0.1 (the cutscene test and the interface speed), from masagrator's
+    FPSLocker-Warehouse (https://github.com/masagrator/FPSLocker-Warehouse, branch `v4`,
+    `SaltySD/plugins/FPSLocker/patches/0100E95004038000/4F5C96E2D97F45AC.yaml` for 3.0.1): the cutscene flag is a
+    uint8 at main+0xbd8f40 (2.1.0 main+0xbd7f40), == 1 forces 30 fps, and the interface struct is at main+0xc232c8
+    (2.1.0 main+0xc222c8), +0x80 the interface speed. He re-finds each per version by a byte pattern (`# REF:` lines),
+    as `fps_sites_xc2.py` finds its sites. Not applied to `frame_rate.c` yet.
 - XC2 builds its window with present interval 1 and never changes it (`XC2_TRACE=gfx`: `nvnWindowSetPresentInterval` is
   not called through the new-game script). Its 30 fps cap is the game's own vsync waits, so 60 fps needs a patch at that
   site, not at the NVN interval.
