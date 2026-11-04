@@ -523,8 +523,8 @@ class Extract(Step):
             rep.warning('warn.npdm_differs', version=game_version(ctx))
 
         romfs = dest / 'romfs'
-        if self.id in ctx.forced:
-            remove(romfs)   # the full hash failed: index.json still claims the extraction's hash
+        if self.id in ctx.forced or not self.image_intact(ctx, romfs, expected):
+            remove(romfs)   # index.json still claims the extraction's hash, whatever the image holds now
         if not extract.romfs_verified(romfs, expected):
             self.merge(ctx, base, update, keys, romfs, expected)
         report = json.loads((romfs / 'index.json').read_text())
@@ -534,6 +534,24 @@ class Extract(Step):
         (dest / 'profile').mkdir(exist_ok=True)
         st = (romfs / 'romfs.bin').stat()
         return {'romfs_size': st.st_size, 'romfs_mtime_ns': st.st_mtime_ns}
+
+    def image_intact(self, ctx, romfs, expected):
+        """Whether an image already in place can be kept. extract.romfs_verified reads only index.json, the claim made
+        when the image was written, and this step records the image's size and time as verified, so a changed image is
+        hashed here: otherwise a repair would record damage as current. An image the record still describes costs no hash;
+        Context.verify_kept checks those. A missing image is for the caller to merge."""
+        image = romfs / 'romfs.bin'
+        if not image.is_file():
+            return True
+        st = image.stat()
+        record = ctx.record(self.id) or {}
+        if st.st_size == record.get('romfs_size') and st.st_mtime_ns == record.get('romfs_mtime_ns'):
+            return True
+        if st.st_size != expected['romfs']['size']:
+            return False
+        rep = ctx.reporter
+        digest = file_sha256(image, lambda d, t: rep.progress('extract', 'verify_romfs', d, t, 'bytes'))
+        return digest == expected['romfs']['sha256']
 
     def merge(self, ctx, base, update, keys, romfs, expected):
         dest, logs = ctx.dest, ctx.temp / 'logs'

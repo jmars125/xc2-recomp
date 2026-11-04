@@ -3,6 +3,7 @@ that would read game data (hactool, the Vulkan loader) are small stand-ins writt
 
 Run: python tests/installer_safety_test.py
 """
+import hashlib
 import io
 import json
 import os
@@ -20,12 +21,13 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from installer import state as statefile  # noqa: E402
 from installer import steps  # noqa: E402
 from installer.steps import extract  # noqa: E402
 import exefs_xc2  # noqa: E402  (tools/, on the path once installer.steps is imported)
 import extract_exefs  # noqa: E402  (the retargeted module tools/exefs_xc2.py registered)
 from installer.events import Reporter  # noqa: E402
-from installer.runner import InstallError  # noqa: E402
+from installer.runner import Context, InstallError  # noqa: E402
 
 GOOD_DEVICE = {'name': 'Good', 'api': [1, 3, 0], 'type': 2, 'missing': []}
 LACKING_DEVICE = {'name': 'Lacking', 'api': [1, 3, 0], 'type': 2, 'missing': ['VK_A', 'VK_B']}
@@ -205,6 +207,122 @@ class PartitionNameTest(unittest.TestCase):
     def test_the_vendored_file_is_left_alone(self):
         source = (ROOT / 'tools' / 'vendor' / 'macnativegames' / 'extract_exefs.py').read_text(encoding='utf-8')
         self.assertNotIn('safe_partition_name', source)
+
+
+class RomfsRepairTest(unittest.TestCase):
+    """Extract's decision about an image that changed after it was recorded, with made-up files and the merge replaced."""
+    GOOD = b'genuine game data'
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.dest, self.temp = self.dir / 'dest', self.dir / 'temp'
+        self.dest.mkdir()
+        (self.temp / 'check').mkdir(parents=True)
+        self.modules = {n: n.encode() for n in (*extract.EXEFS_CODE, 'main.npdm')}
+        expected = {'version': 1, 'display_version': '3.0.1',
+                    'exefs_sha256': {n: hashlib.sha256(d).hexdigest() for n, d in self.modules.items()},
+                    'romfs': {'size': len(self.GOOD), 'sha256': hashlib.sha256(self.GOOD).hexdigest()}}
+        self.expected = self.dir / 'expected.json'
+        self.expected.write_text(json.dumps(expected))
+        self.layout = SimpleNamespace(release='r1', expected=lambda version: self.expected)
+        self.options = SimpleNamespace()
+        for name in ('base', 'update', 'keys'):
+            path = self.dir / name
+            path.write_bytes(b'dummy')
+            setattr(self.options, name, path)
+        self.state = statefile.empty('r1')
+        self.state['version'] = '3.0.1'
+        self.merges = 0
+        self.step = steps.Extract()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_good_image(self, *_):
+        self.merges += 1
+        romfs = self.dest / 'romfs'
+        romfs.mkdir(exist_ok=True)
+        (romfs / 'romfs.bin').write_bytes(self.GOOD)
+        (romfs / 'index.json').write_text(json.dumps({'romfs_size': len(self.GOOD), 'files': [],
+                                                      'romfs_sha256': hashlib.sha256(self.GOOD).hexdigest()}))
+
+    def context(self, forced=()):
+        """A context planned the way run_steps plans it, with the verify pass of the check step done."""
+        ctx = Context(self.layout, self.dest, self.temp, Reporter(out=io.StringIO()), self.options, state=self.state)
+        ctx.steps = [self.step]
+        ctx.plan(forced)
+        ctx.verify_kept('check')
+        return ctx
+
+    def run_step(self, forced=()):
+        ctx = self.context(forced)
+        if ctx.will_run('extract'):
+            staged = self.temp / 'check' / 'update' / 'exefs'
+            staged.mkdir(parents=True, exist_ok=True)
+            for name, data in self.modules.items():
+                (staged / name).write_bytes(data)
+            with mock.patch.object(steps.Extract, 'merge', side_effect=self.write_good_image):
+                fields = self.step.run(ctx)
+            self.state['steps']['extract'] = {'key': ctx.keys['extract'], 'release': 'r1', **fields}
+        return ctx
+
+    def later(self, data=None):
+        """Rewrite the image (or just touch it), with a modification time the record cannot hold."""
+        image = self.dest / 'romfs' / 'romfs.bin'
+        if data is not None:
+            image.write_bytes(data)
+        st = image.stat()
+        os.utime(image, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    def test_a_fresh_extraction_is_current_afterwards(self):
+        self.run_step()
+        self.assertEqual(self.merges, 1)
+        self.assertFalse(self.context().will_run('extract'))
+
+    def test_same_size_damage_is_merged_again(self):
+        self.run_step()
+        self.later(bytes(len(self.GOOD)))
+        ctx = self.context()
+        self.assertTrue(ctx.will_run('extract'))
+        self.run_step()
+        self.assertEqual(self.merges, 2)
+        self.assertEqual((self.dest / 'romfs' / 'romfs.bin').read_bytes(), self.GOOD)
+        self.assertFalse(self.context().will_run('extract'))   # and not because damage was recorded as current
+
+    def test_an_intact_image_with_a_new_time_is_hashed_and_kept(self):
+        self.run_step()
+        self.later()
+        self.run_step()
+        self.assertEqual(self.merges, 1)
+        self.assertFalse(self.context().will_run('extract'))
+
+    def test_a_damaged_image_without_a_record_is_merged_again(self):
+        self.write_good_image()
+        self.merges = 0
+        self.later(bytes(len(self.GOOD)))   # a run killed before it recorded the step
+        self.run_step()
+        self.assertEqual(self.merges, 1)
+        self.assertEqual((self.dest / 'romfs' / 'romfs.bin').read_bytes(), self.GOOD)
+
+    def test_an_unchanged_image_is_not_hashed_when_the_step_runs_for_another_reason(self):
+        self.run_step()
+        (self.dest / 'exefs' / 'main').write_bytes(b'damaged code')
+        self.assertTrue(self.context().will_run('extract'))
+        with mock.patch.object(steps, 'file_sha256', wraps=steps.file_sha256) as hashed:
+            self.run_step()
+        self.assertEqual(self.merges, 1)
+        image = self.dest / 'romfs' / 'romfs.bin'
+        self.assertNotIn(image, [c.args[0] for c in hashed.call_args_list])
+
+    def test_verify_still_catches_damage_that_keeps_the_time(self):
+        self.run_step()
+        image = self.dest / 'romfs' / 'romfs.bin'
+        st = image.stat()
+        image.write_bytes(bytes(len(self.GOOD)))
+        os.utime(image, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertFalse(self.context().will_run('extract'))
+        self.assertFalse(self.step.verify(self.context(), self.state['steps']['extract']))
 
 
 class HostCheckTest(unittest.TestCase):

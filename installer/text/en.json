@@ -11,6 +11,7 @@
  "phase.check.verify_romfs": "Checking the installed game data",
  "phase.check.inputs": "Opening the game files with the keys",
  "phase.check.versions": "Checking the game versions",
+ "phase.extract.verify_romfs": "Checking the game data already extracted",
  "phase.extract.hash_base": "Computing the checksum of the base game",
  "phase.extract.hash_update": "Computing the checksum of the update",
  "phase.extract.exefs": "Extracting the game code",

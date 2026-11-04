@@ -11,6 +11,7 @@
  "phase.check.verify_romfs": "Проверка установленных данных игры",
  "phase.check.inputs": "Открытие игровых файлов с помощью ключей",
  "phase.check.versions": "Проверка версий игры",
+ "phase.extract.verify_romfs": "Проверка уже извлечённых данных игры",
  "phase.extract.hash_base": "Подсчёт контрольной суммы базовой игры",
  "phase.extract.hash_update": "Подсчёт контрольной суммы обновления",
  "phase.extract.exefs": "Распаковка кода игры",
