@@ -53,7 +53,7 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_OUTPUT_RES] = "Game resolution",
     [UI_MENU_OUTPUT_RES_DESC] = "The shape the picture is shown in. XC2 draws at its own size; a shape other than 16:9 "
                                 "(3440 x 1440) widens the 3D view when this build has the aspect patch set, and the "
-                                "interface is stretched with the picture. Takes effect after a restart.",
+                                "interface stays in the left 16:9 part. Takes effect after a restart.",
     [UI_MENU_RENDER_SCALE] = "3D render scale",
     [UI_MENU_RENDER_SCALE_DESC] = "Not in effect for XC2 yet: the game keeps its own dynamic resolution, as the code "
                                   "that sets it is not found. Game leaves it to the game; a percentage will fix it "

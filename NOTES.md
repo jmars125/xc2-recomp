@@ -70,8 +70,8 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   its inverse there and switches the set on for a shape other than 16:9, as `frame_rate.c xc2_rate_store` does for
   the 1/30 loads of `xc360`. The 16:9 frame then holds the wider view, and the present fits the frame at the output's
   shape (`gfx_present.c present_image`, `res_aspect_shape`), so `picture_fit = keep` shows a 21:9 output whole on a
-  21:9 window. The interface is laid out on the 16:9 canvas and stretches with the picture, as with the mods under
-  the emulators' "stretch to window". On a 2.1.0 `main` the finder checks its result against the mods' sites (agree
+  21:9 window. The interface is laid out on the 16:9 canvas and, with the render size set on, sits in the left part of
+  the picture: it is not stretched and not centred. On a 2.1.0 `main` the finder checks its result against the mods' sites (agree
   or disagree per site) and against the size pairs Fl4sh_ turns into 2580x1080 (0x6caff8, 0x6cb060, 0x70a634); on
   1.0.0 it verifies the pattern inside `getAspect` itself and names its callers.
   Run on 1.0.0 (2026-11-03, `build/extracted/v0`): eight sites, all camera code. `ml::DevGraphNx::getPersSys`+0x60

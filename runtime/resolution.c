@@ -188,7 +188,7 @@ void res_init(void) {
     R.aspect = on;
     if (on)
         rt_log("resolution: 3D view laid out for %ux%u (aspect %.4f against 16:9 %.4f); the interface stays on the "
-               "16:9 canvas, stretched with the picture", R.ow, R.oh, (double)aspect, 16.0 / 9);
+               "16:9 canvas, in the left part of the picture", R.ow, R.oh, (double)aspect, 16.0 / 9);
     else
         rt_log("resolution: %ux%u, the 3D view stays 16:9 (%s)", R.ow, R.oh, wanted ? "the output is 16:9" : "XC2_ASPECT=0");
 }
@@ -213,5 +213,5 @@ int res_aspect_shape(unsigned shape[2]) {
 
 // The interface's horizontal scale on a frame wider than 16:9: 1 for XC2. XCX's fit (nvn_api_cmd.c, in the history)
 // narrowed the interface's uniform blocks, viewports and scissors at XCX's own sites; XC2's are not found, so its
-// interface is stretched with the picture. The API stays so that the fit returns here once the sites are known.
+// interface stays on its 16:9 canvas, in the left part of a wider picture. The API stays so that the fit returns here once the sites are known.
 float res_ui_fit(void) { return 1; }

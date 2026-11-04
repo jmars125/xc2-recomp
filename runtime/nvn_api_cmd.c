@@ -661,7 +661,7 @@ NVN_API(nvnCommandBufferBindVertexBuffer) {
 // 2x4 transform bound by XCX's main+0x95cd50), and the interface's viewports and scissors, around the centre of the
 // output-sized target, telling the HUD's nodes apart by the return address of XCX's interface loop. Every address was
 // XCX's. XC2's interface sites are not found (tools/aspect_sites_xc2.py lists candidates as INFO), so on a wide output
-// XC2's interface is stretched with the picture (resolution.c res_ui_fit).
+// XC2's interface sits in the left part of the picture (resolution.c res_ui_fit).
 
 // Uniform and storage buffers: one record per binding (CB_SIZE/ADDRESS 4 words + CB_BIND 1 on hardware).
 static void bind_buffers(const Cpu *c, uint32_t op) {   // (cmd, stage, first, n, const NVNbufferRange *ranges)
