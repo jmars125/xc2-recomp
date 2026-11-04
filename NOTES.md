@@ -74,19 +74,34 @@ Test runs: `XC2_ASSUME_FOCUS=1 XC2_BACKGROUND_WINDOW=1`, `--boot`, `XC2_INPUT_SC
   the emulators' "stretch to window". On a 2.1.0 `main` the finder checks its result against the mods' sites (agree
   or disagree per site) and against the size pairs Fl4sh_ turns into 2580x1080 (0x6caff8, 0x6cb060, 0x70a634); on
   1.0.0 it verifies the pattern inside `getAspect` itself and names its callers.
-  Run on 1.0.0 (2026-11-03, `build/extracted/v0`): five sites, all camera code. `ml::DevGraphNx::getPersSys`+0x60,
-  the projection builder, divides DevGraph's render size (+0x230 / +0x234) inline for its own matrix (it neither calls
-  `getAspect`, which has no caller at all, nor reads a cached field); `ml::ScnObjCam::apply`+0x30 (from the viewport),
-  `ml::ScnObjCam::setSize`+0x4c and `ml::ScnCamMan::update`+0x188 store their quotient to RENDER_INFO +0x1f0, the
-  aspect the frustum is derived from, so they are patched as well (a widened projection with a 16:9 frustum would cull
-  at the sides); `getAspect`+0x28 itself is the fifth. `getAspect` and `setSize` are leaves, patched through x8 and x9
-  (their converted width dies at the `ret` or the tail call); the others through x30. `gen.py --patches` accepts the
-  set (no mismatched word, five gated sites in the C). The 15 other divisions of converted integers are HP rates, menu
-  buttons, the minimap, the layout and `gf::PlayerCamera`'s root-size aspect (1280/720, the interface canvas), left
-  alone. 1.0.0 has no 1920/1080 pair; its 1280/720 pairs are `ml::WorkRoot::getWidth`, `grlib::CGLibDisplay::setup`,
-  `ui::UILayoutObject::updateSize`, the movie player and the title loader. The five sites are `KNOWN_SITES['1.0.0']`.
-  Not done yet: the finder has run on 1.0.0 only; `patches-upd.txt` (3.0.1) has no `aspect` set yet and `res_init`
-  logs that. Its `--selftest` covers the forms on a synthetic image. To finish: `fps_sites_xc2.py main > patches-upd.txt`, `aspect_sites_xc2.py main --sizes >> patches-upd.txt`
+  Run on 1.0.0 (2026-11-03, `build/extracted/v0`): eight sites, all camera code. `ml::DevGraphNx::getPersSys`+0x60
+  divides DevGraph's render size (+0x230 / +0x234) inline for a matrix of its own (it neither calls `getAspect`, which
+  has no caller at all, nor reads a cached field). The camera's own projection and frustum come from RENDER_INFO
+  +0x1f0 (its 26 `ldr s` readers cluster in `ScnObjCam` and `ScnCamMan`), and every writer of that field divides a
+  size: `ml::ScnObjCam::apply`+0x30 (the viewport, +8 / +0xc), `ml::ScnObjCam::setSize`+0x4c (its argument),
+  `ml::ScnCamMan::update`+0x188 (the size it stores to +0x1e0 / +0x1e4 first), and the constructor
+  `ml::ScnObjCam::ScnObjCam`+0x130 / +0x198 and `ml::ScnObjCam::infoInit`+0x68, which call `getRootWidth()` and
+  `getRootHeight()` (1280x720, 16:9 as well) after setting fov 40, near 0.1, far 80000; `getAspect`+0x28 is the eighth.
+  `getAspect` and `setSize` are leaves, patched through x8 and x9 (their converted width dies at the `ret` or the tail
+  call); the others through x30. The 15 other divisions of converted integers are HP rates, menu buttons, the minimap,
+  the layout and `gf::PlayerCamera`'s root-size aspect, left alone. 1.0.0 has no 1920/1080 pair; its 1280/720 pairs are
+  `ml::WorkRoot::getWidth`, `grlib::CGLibDisplay::setup`, `ui::UILayoutObject::updateSize`, the movie player and the
+  title loader.
+  Run on 3.0.1 (stripped): five sites, read in the disassembly by their shape: main+0x6aac00 (`getPersSys`, the same
+  prologue and GOT load of DevGraph), +0x6c2c18 (`ScnCamMan::update`, stores +0x1e0 / +0x1e4 then +0x1f0),
+  +0x6cb88c and +0x6cb8f4 (two constructor / `infoInit` copies: fov 40 to +0x1e8, near 0.1, far 80000, then
+  `bl main+0x6a2edc` / `bl main+0x6a2efc`, the root getters, divided and stored to +0x1f0), +0x6cc854 (`apply`, the
+  viewport with the 1.0 guard). `getAspect` and `setSize` have no copy of their own in 3.0.1. The first 3.0.1 set had
+  only the first, second and fifth: the game ran, the log said the set was on, and the title screen and the opening
+  cutscene were byte-identical with `XC2_ASPECT=1` and `=0`, because their cameras take the aspect from the
+  constructors. The two nnMain matches the finder lists as weak (main+0x68574c, +0x685818) divide
+  `(x - min) / (max - min)` from `ldp w8, w9, [x20, #0x80]`, progress fractions, not aspects; main+0x725c7c stores +0x1f0
+  from a lerp of two cameras' +0x1e8 .. +0x1f4 (a camera blend, derived); main+0x51288c writes another struct. 3.0.1
+  holds 112 `str` to `[x?, #0x1f0]` (98 w, 14 s), 14 of them `str s`, the five above plus the blend, two to the stack
+  and the rest other structs. Both results are `KNOWN_SITES` and `gen.py --patches` accepts both sets (no mismatched
+  word, five and eight gated sites in the C).
+  Not done yet: the five-site 3.0.1 set has not been run in the game (the three-site one has, see above). Its
+  `--selftest` covers the forms on a synthetic image. To finish: `fps_sites_xc2.py main > patches-upd.txt`, `aspect_sites_xc2.py main --sizes >> patches-upd.txt`
   (stderr names each site's function, the sites it left unpatched and why), `gen.py --patches`, build, and a run at
   3440x1440 with `XC2_OUTPUT_RES=3440x1440`: the 3D view must show more at the sides, not a stretched 16:9. Which of
   the three sites is the field camera and which the menus or the map is not known; run 2.1.0 first, where the mods'

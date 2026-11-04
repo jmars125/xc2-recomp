@@ -86,4 +86,6 @@ site xc360 main 6a3710 a9417bfd @page:x8 bd405100 a9417bfd
 set aspect XC2_ASPECT 1
 site aspect main 6aac00 1e22182b @page:x30 bd4063cb
 site aspect main 6c2c18 1e211800 @page:x30 bd4063c0
+site aspect main 6cb88c 1e201900 @page:x30 bd4063c0
+site aspect main 6cb8f4 1e201900 @page:x30 bd4063c0
 site aspect main 6cc854 1e211800 @page:x30 bd4063c0

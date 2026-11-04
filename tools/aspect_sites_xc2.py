@@ -24,7 +24,11 @@ The primary form (p):
 
 the division of two integers that live in memory just before, loaded (ldr, ldur or ldp w) or stored (str, stur or
 stp w, as ml::ScnCamMan::update stores the size to RENDER_INFO +0x1e0 / +0x1e4 before dividing it), the width at the
-lower offset. The patch
+lower offset; or returned by two calls (bl ; scvtf s8, w0 ; bl ; scvtf s0, w0 ; fdiv s0, s8, s0: ml::ScnObjCam's
+constructor and infoInit divide DevGraph::getRootWidth() by getRootHeight(), the 1280x720 canvas, 16:9 as well;
+1.0.0 main+0x712df0 and +0x712e10, 3.0.1 main+0x6a2edc and +0x6a2efc), the width being the call at the lower
+address, as getRootWidth precedes getRootHeight; a bl between the two conversions is passed only for s8..s15, which
+a call preserves. The patch
 replaces the fdiv alone with adrp x30, <patch page> ; ldr s<d>, [x30, #slot]: a patch site replaces one instruction
 with any number (recomp/patches.py), so the two scvtf stay in place and only the quotient comes from the page
 (+0x60 width / height; +0x64 height / width, for a division the other way round, emitted only when one is found).
@@ -37,15 +41,19 @@ cbz each, fmov s0, #1.0 for the guarded path, scvtf, scvtf, fdiv, ret) ends in r
 scratch register is the x-form of one of the scvtf sources (x8 or x9, caller-saved temporaries that die at the ret),
 when no instruction between the fdiv and the ret reads it; the zero guards stay, so a zero size still yields 1.0. A
 leaf that ends in a tail call (ml::ScnObjCam::setSize: b updateViewMatrix) counts the same when main's symbols say
-the branch goes to a function's start, with x8..x17 only, as x0..x7 carry the call's arguments.
+the branch goes to a function's start or, in a stripped main, when it goes outside the function (below the previous
+ret or more than 0x400 bytes ahead), with x9..x15 only: x0..x7 carry the call's arguments, x8 may carry an indirect
+result and x16, x17 are the linker's.
 A site that fails both rules is listed as INFO with the reason. The walks from the fdiv back to the scvtf and from a
 scvtf back to its load pass through conditional branches (the zero guards) and stop at an unconditional branch, a
 call, a ret or a write to the register traced. The INFO list also names a division of two converted integers that
 are not loaded from memory (a weaker match, for the reader). Each site's line names where the quotient is stored when
-an instruction right after stores it: on 1.0.0 ml::DevGraphNx::getPersSys, the projection builder, divides DevGraph's
-render size for its own matrix, and ml::ScnObjCam::apply, ml::ScnObjCam::setSize and ml::ScnCamMan::update store
-their quotient to RENDER_INFO +0x1f0, the aspect the frustum (updateFovNearFar) is derived from, so both kinds need
-the patch: a widened projection with a 16:9 frustum culls at the sides.
+an instruction right after stores it: ml::DevGraphNx::getPersSys divides DevGraph's render size for a matrix of its
+own, and ml::ScnObjCam::apply, ml::ScnObjCam::setSize (1.0.0), the camera constructors (3.0.1) and
+ml::ScnCamMan::update store their quotient to RENDER_INFO +0x1f0, the aspect the camera's projection and frustum are
+built from (its readers cluster in ScnObjCam and ScnCamMan), so every writer needs the patch: with the three sites of
+the first 3.0.1 set alone (getPersSys, ScnCamMan::update, apply) the title and the opening cutscene did not change,
+because their cameras take the aspect from the constructors.
 
 The secondary forms, the loads of the f32 constants 16/9 (0x3fe38e39) and 9/16 (0x3f100000), in case a version holds
 one for a default or a fallback:
@@ -62,8 +70,8 @@ Patch page slot map (the page is the first 4 KiB after main's image; the runtime
 XC3's sets used +0 .. +0xb and +0x50 .. +0x6b; none of them exists in XC2's table, so the slots are free here.
 
 KNOWN_SITES holds the 2.1.0 sites of the two mods, the fdiv being the last slot of each of Fl4sh_'s triples (the one
-theboy181 rewrites), with the function each lies in, and the five 1.0.0 sites this script found and that were read
-in the disassembly. When the scanned main is one of those versions (its build id) the result is checked against
+theboy181 rewrites), with the function each lies in, and the eight 1.0.0 and five 3.0.1 sites this script found and
+that were read in the disassembly. When the scanned main is one of those versions (its build id) the result is checked against
 them, agree or disagree per site, and sites the list does not have are listed as new. When main keeps
 its symbols (1.0.0), the pattern is verified inside ml::DevGraph::getAspect itself, its callers (b and bl) are named,
 and ml::DevGraphNx::getPersSys, the projection builder, is described: whether it calls getAspect, inlines it, or
@@ -105,9 +113,16 @@ KNOWN_SITES = {'2.1.0': {'fdiv': [(0x7e308c, 0x7e3080, 0x7e2f88), (0x6cbfd4, 0x6
                # 1.0.0: this script's own result (2026-11-03), each site read in the disassembly: a regression check,
                # not a mod's. ml::DevGraph::getAspect, ml::DevGraphNx::getPersSys (the projection builder),
                # ml::ScnCamMan::update, ml::ScnObjCam::setSize, ml::ScnObjCam::apply (the three store RENDER_INFO +0x1f0)
+               # ml::ScnObjCam::ScnObjCam (two copies) and ml::ScnObjCam::infoInit (root width / height by calls)
                '1.0.0': {'fdiv': [(0x7136c0, 0x7136b8, 0x713698), (0x72262c, 0x722624, 0x7225cc),
                                   (0x741958, 0x741950, 0x7417d0), (0x742984, 0x742978, 0x742938),
-                                  (0x753668, 0x753660, 0x753638)],
+                                  (0x751fe0, 0x751fd0, 0x751eb0), (0x752048, 0x752038, 0x751eb0),
+                                  (0x752164, 0x752154, 0x7520fc), (0x753668, 0x753660, 0x753638)],
+                         'sizes': []},
+               # 3.0.1 (stripped): the same result read in the disassembly, by shape: getPersSys, ScnCamMan::update,
+               # two constructor / infoInit copies, apply; getAspect and setSize have no copy of their own
+               '3.0.1': {'fdiv': [(0x6aac00, 0x6aabf8, None), (0x6c2c18, 0x6c2c10, None), (0x6cb88c, 0x6cb87c, None),
+                                  (0x6cb8f4, 0x6cb8e4, None), (0x6cc854, 0x6cc84c, None)],
                          'sizes': []}}
 GET_ASPECT = '_ZN2ml8DevGraph9getAspectEv'
 GET_PERS_SYS = '_ZN2ml10DevGraphNx10getPersSysERN2mm5Mat44Efff'
@@ -346,10 +361,12 @@ class Image:
         self.build_id = build_id.lower()
         self.words = struct.unpack_from(f'<{len(self.image) // 4}I', self.image)
         self.syms = {s[0]: (s[3], s[4]) for s in syms if s[3] and s[2]}   # (name, info, shndx, value, size)
-        funcs = sorted((a, n) for n, (a, _) in self.syms.items())
-        self.func_addrs = [a for a, _ in funcs]
-        self.func_names = [s for _, s in funcs]
+        funcs = sorted((a, n, z) for n, (a, z) in self.syms.items())
+        self.func_addrs = [a for a, _, _ in funcs]
+        self.func_names = [n for _, n, _ in funcs]
+        self.func_sizes = [z for _, _, z in funcs]
         self.func_starts = set(self.func_addrs)
+        self.symbolic = len(funcs) >= 1000   # 1.0.0 keeps ~51,000 names; a stripped update keeps a handful of exports
 
     @classmethod
     def from_nso(cls, path):
@@ -368,7 +385,9 @@ class Image:
 
     def name_of(self, off):
         i = bisect.bisect_right(self.func_addrs, off) - 1
-        return f'{self.func_names[i]}+{off - self.func_addrs[i]:#x}' if i >= 0 else '?'
+        if i < 0 or (self.func_sizes[i] and off >= self.func_addrs[i] + self.func_sizes[i]):
+            return '?'
+        return f'{self.func_names[i]}+{off - self.func_addrs[i]:#x}'
 
     def text_range(self, start=None, end=None):
         lo = self.text[0] if start is None else start
@@ -403,6 +422,8 @@ def scvtf_source(img, a, s):
     for b in range(a - 4, max(a - 4 * CVT_LIMIT, img.text[0]) - 4, -4):
         w = img.word(b)
         if is_flow_end(w):
+            if w >> 26 == 0x25 and 8 <= s <= 15:   # a call keeps s8..s15
+                continue
             return None
         if is_cond_branch(w):
             continue
@@ -412,12 +433,13 @@ def scvtf_source(img, a, s):
 
 
 def load_source(img, a, r):
-    """(base register, offset) of the memory w<r> was loaded from, or stored to, last before a; None when another
-    instruction wrote it or nothing names its home (offset None: a register or a moving base)."""
+    """(base register, offset) of the memory w<r> was loaded from, or stored to, last before a, or ('call', target)
+    when w0 is the result of the bl just before; None when another instruction wrote it or nothing names its home
+    (offset None: a register or a moving base)."""
     for b in range(a - 4, max(a - 4 * LOAD_LIMIT, img.text[0]) - 4, -4):
         w = img.word(b)
         if is_flow_end(w):
-            return None
+            return ('call', direct_target(w, b)) if w >> 26 == 0x25 and r == 0 else None
         if is_cond_branch(w):   # a zero guard between the load and the conversion (cbz w<r> names r but writes nothing)
             continue
         home = int_home(w)
@@ -439,6 +461,19 @@ def quotient_store(img, a, d):
     return ''
 
 
+def is_tail_call(img, site, b, target):
+    """Whether the b at b (after the site) leaves the function: to a symbol's start when main keeps its symbols, else
+    outside the function, below the ret that ends the previous one or more than 0x400 bytes ahead."""
+    if img.symbolic:
+        return target in img.func_starts
+    lo = site - 0x400
+    for c in range(site - 4, max(site - FUNC_LIMIT, img.text[0]) - 4, -4):
+        if is_ret(img.word(c)):
+            lo = c + 4
+            break
+    return target < lo or target > b + 0x400
+
+
 def leaf_scratch(img, a, regs):
     """The register among regs (the scvtf sources, as x registers) a leaf may clobber at the fdiv a: the fall-through
     path reaches ret within LEAF_LIMIT instructions without reading it. Caller-saved temporaries x8..x17 first, then
@@ -452,10 +487,10 @@ def leaf_scratch(img, a, regs):
         if is_ret(w):
             break
         t = direct_target(w, b)
-        if t is not None and w >> 26 == 0x05 and t in img.func_starts:   # a tail call: x0..x7 carry its arguments
-            order = [r for r in order if r >= 8]
+        if t is not None and w >> 26 == 0x05 and is_tail_call(img, a, b, t):   # x0..x7 carry its arguments
+            order = [r for r in order if 9 <= r <= 15]
             if not order:
-                return None, f'the path ends in a tail call at main+{b:#x} and both scvtf sources are argument registers'
+                return None, f'the path ends in a tail call at main+{b:#x} and no scvtf source is one of x9..x15'
             break
         if is_branch(w):
             return None, f'the path from the fdiv branches at main+{b:#x} before a ret'
@@ -466,6 +501,10 @@ def leaf_scratch(img, a, regs):
         if not any(reads_reg(w, r) for w in path):
             return r, None
     return None, 'every scvtf source register is read again before the ret'
+
+
+def home(h):
+    return f'main+{h[1]:#x}()' if h[0] == 'call' else f'x{h[0]}+{h[1]}'
 
 
 def computed_sites(img, lo=None, hi=None):
@@ -491,14 +530,16 @@ def computed_sites(img, lo=None, hi=None):
         order = None
         if lx[0] == ly[0] and lx[1] is not None and ly[1] is not None and lx[1] != ly[1]:
             order = 'w/h' if lx[1] < ly[1] else 'h/w'
+            if lx[0] == 'call':   # by the callees' addresses: getRenderW precedes getRenderH
+                order += '?'
         scratch, why = 30, x30_dead(img, a)
         if why:   # a leaf: one of the converted registers dies at the ret that follows
             scratch, why2 = leaf_scratch(img, a, [cx[1], cy[1]])
             if scratch is None:
-                info.append((a, f'computed aspect (fdiv s{d}, s{x}, s{y}; window main+{start:#x}; loads at x{lx[0]}+'
-                                f'{lx[1]}, x{ly[0]}+{ly[1]}): not patched, {why}; as a leaf, {why2}'))
+                info.append((a, f'computed aspect (fdiv s{d}, s{x}, s{y}; window main+{start:#x}; from {home(lx)}, '
+                                f'{home(ly)}): not patched, {why}; as a leaf, {why2}'))
                 continue
-        slot = SLOT_INVERSE if order == 'h/w' else SLOT_ASPECT
+        slot = SLOT_INVERSE if order in ('h/w', 'h/w?') else SLOT_ASPECT
         sites.append((a, w, [('page', scratch), ldr_s(d, scratch, slot)], slot, start, order))
     return sites, info
 
@@ -632,12 +673,12 @@ def check_known(version, sites, sizes, known=KNOWN_SITES):
     out = []
     found = {a: s for a, _, _, _, s, _ in sites}
     for fdiv, start, func in k['fdiv']:
+        where = f' (function main+{func:#x})' if func is not None else ''
         if fdiv in found:
-            note = '' if found[fdiv] == start else f' (window starts at main+{found[fdiv]:#x}, the mod at main+{start:#x})'
-            out.append((f'agree main+{fdiv:#x} (function main+{func:#x}){note}', True))
+            note = '' if found[fdiv] == start else f' (window starts at main+{found[fdiv]:#x}, the list says main+{start:#x})'
+            out.append((f'agree main+{fdiv:#x}{where}{note}', True))
         else:
-            out.append((f'disagree main+{fdiv:#x} (function main+{func:#x}): the mod patches it, the scanner has no site there',
-                        False))
+            out.append((f'disagree main+{fdiv:#x}{where}: the list has it, the scanner has no site there', False))
     for a in sorted(found):
         if a not in {f for f, _, _ in k['fdiv']}:
             out.append((f'new main+{a:#x}: a site the mods do not have', True))
@@ -701,7 +742,8 @@ def emit(sites, version, out=sys.stdout):
 
 def report(img, computed, constants, info, sizes, known, symbols, out=sys.stderr):
     for a, w, repl, slot, start, order in computed:
-        how = {'w/h': 'width / height', 'h/w': 'height / width', None: 'order assumed width / height'}[order]
+        how = {'w/h': 'width / height', 'h/w': 'height / width', 'w/h?': 'width / height by the callees\' order',
+               'h/w?': 'height / width by the callees\' order', None: 'order assumed width / height'}[order]
         store = quotient_store(img, a, w & 31)
         print(f'site main+{a:#x} {img.name_of(a)}: computed aspect, window main+{start:#x}, {how} -> +{slot:#x} '
               f'through x{repl[0][1]}{", stored to " + store if store else ""}', file=out)
@@ -780,6 +822,16 @@ def selftest():
     p9 = len(code) * 4 - 4
     code += [0xBD01F100, 0x14000000 | (((f1 - len(code) * 4 - 4) >> 2) & 0x3FFFFFF)]   # str s0, [x8, #0x1f0] ; b fn_a
     f9_end = len(code) * 4
+    # (p) from two calls, as the 3.0.1 camera constructors: bl W ; scvtf s8, w0 ; bl H ; scvtf s0, w0 ; fdiv s0, s8, s0
+    f10 = len(code) * 4
+    code += [STP_X29_X30_PRE_20, bl(len(code) * 4 + 4, f1), scvtf_s(8, 0), bl(len(code) * 4 + 12, f2), scvtf_s(0, 0),
+             0xAA1403E0, fdiv_s(0, 8, 0)]
+    p10 = len(code) * 4 - 4
+    code += [0xBD01F280, LDP_X29_X30_POST_20, RET]   # str s0, [x20, #0x1f0]
+    # a leaf whose b stays inside the function (forward, near): not a tail call, no site
+    f11 = len(code) * 4
+    code += [ldr_w(9, 1, 0), ldr_w(10, 1, 4), scvtf_s(0, 9), scvtf_s(1, 10), fdiv_s(0, 0, 1), 0x14000002, NOP, RET]
+    p11 = len(code) * 4 - 16
     # a division of two converted integers that came from arithmetic, not a load: the weak INFO
     code += [STP_X29_X30_PRE_20, 0x0B090108, 0x0B080129, scvtf_s(0, 8), scvtf_s(1, 9), fdiv_s(0, 0, 1)]   # add w8, w8, w9 ; add w9, w9, w8
     p4 = len(code) * 4 - 4
@@ -815,7 +867,8 @@ def selftest():
     image[rodata_base:rodata_base + len(rod)] = rod
     syms = [('fn_a', 0, 1, f1, f2 - f1), ('fn_b', 0, 1, f2, f3 - f2), ('fn_c', 0, 1, f3, f5 - f3),
             (GET_ASPECT, 0, 1, f5, f5_end - f5), (GET_PERS_SYS, 0, 1, f6, f6_end - f6), ('fn_g', 0, 1, f7, f8 - f7),
-            ('fn_h', 0, 1, f8, f9 - f8), ('fn_i', 0, 1, f9, f9_end - f9)]
+            ('fn_h', 0, 1, f8, f9 - f8), ('fn_i', 0, 1, f9, f9_end - f9), ('fn_j', 0, 1, f10, f11 - f10)]
+    syms += [(f'pad_{i}', 0, 1, 0x3000 + 8 * i, 4) for i in range(1000)]   # a table large enough to count as kept
     img = Image(image, (0, len(text)), (rodata_base, len(rod)), (rodata_base + len(rod), 0), syms=syms,
                 build_id=BUILD_IDS['2.1.0'].upper() + '0' * 32)
     assert gate(img) == '2.1.0'
@@ -829,7 +882,16 @@ def selftest():
     assert int_load(0xB85F0268) == {8: (19, -16)}, 'ldur w8, [x19, #-16]'
     # the primary form
     computed, info = computed_sites(img)
-    assert [s[0] for s in computed] == [p1, p2, p3, p5, p7, p8, p9], ([hex(s[0]) for s in computed], [hex(x) for x in (p1, p2, p3, p5, p7, p8, p9)], info)
+    assert img.symbolic and img.name_of(f11 + 4) == '?', 'fn_j ends before f11'
+    assert [s[0] for s in computed] == [p1, p2, p3, p5, p7, p8, p9, p10], ([hex(s[0]) for s in computed], info)
+    assert computed[7][1:] == (fdiv_s(0, 8, 0), [('page', 30), ldr_s(0, 30, SLOT_ASPECT)], SLOT_ASPECT, p10 - 16, 'w/h?'), computed[7]
+    assert load_source(img, p10 - 8, 0) == ('call', f2) and load_source(img, p10 - 16, 0) == ('call', f1)
+    assert 'branches at' in dict(info)[p11], dict(info)[p11]
+    stripped = Image(image, img.text, img.rodata, img.data)   # the same code without symbols: the distance rule
+    assert not stripped.symbolic
+    scomputed, sinfo = computed_sites(stripped)
+    assert [s[0] for s in scomputed] == [s[0] for s in computed] and scomputed[6][2] == [('page', 9), ldr_s(0, 9, SLOT_ASPECT)]
+    assert [a for a, _ in sinfo] == [a for a, _ in info], (sinfo, info)
     assert computed[4][1:] == (fdiv_s(11, 1, 2), [('page', 30), ldr_s(11, 30, SLOT_ASPECT)], SLOT_ASPECT, p7 - 8, 'w/h'), computed[4]
     assert computed[5][1:] == (fdiv_s(0, 0, 1), [('page', 30), ldr_s(0, 30, SLOT_ASPECT)], SLOT_ASPECT, p8 - 8, 'w/h'), computed[5]
     assert computed[6][1:] == (fdiv_s(0, 0, 1), [('page', 9), ldr_s(0, 9, SLOT_ASPECT)], SLOT_ASPECT, p9 - 8, 'w/h'), computed[6]
@@ -840,9 +902,9 @@ def selftest():
     assert computed[1][1:] == (fdiv_s(2, 1, 0), [('page', 30), ldr_s(2, 30, SLOT_INVERSE)], SLOT_INVERSE, p2 - 8, 'h/w'), computed[1]
     assert computed[2][1:] == (fdiv_s(0, 0, 1), [('page', 8), ldr_s(0, 8, SLOT_ASPECT)], SLOT_ASPECT, p3 - 8, 'w/h'), computed[2]
     assert computed[3][1:] == (fdiv_s(0, 0, 1), [('page', 8), ldr_s(0, 8, SLOT_ASPECT)], SLOT_ASPECT, p5 - 8, 'w/h'), computed[3]
-    assert [a for a, _ in info] == [p3b, p4], [hex(a) for a, _ in info]
-    assert 'x30 is live' in info[0][1] and 'read again before the ret' in info[0][1], info[0]
-    assert 'not loaded from memory' in info[1][1], info[1]
+    assert [a for a, _ in info] == sorted([p3b, p4, p11]), [hex(a) for a, _ in info]
+    assert 'x30 is live' in dict(info)[p3b] and 'read again before the ret' in dict(info)[p3b], info
+    assert 'not loaded from memory' in dict(info)[p4], info
     assert x30_dead(img, p1) is None and x30_dead(img, p3) and x30_dead(img, p5)
     assert leaf_scratch(img, p3, [8, 9]) == (8, None) and leaf_scratch(img, p3, [9, 8]) == (8, None)
     assert leaf_scratch(img, p3, [19, 20])[0] is None and leaf_scratch(img, p1, [8, 9])[0] is None
@@ -873,10 +935,10 @@ def selftest():
     assert 'calls getAspect 1x' in symbols[3] and 's1 <- [x0, #0x1f0]' in symbols[3] and 'no computed aspect' in symbols[3], symbols[3]
     known = {'2.1.0': {'fdiv': [(p1, p1 - 12, f1), (p3b, p3b - 8, f3)], 'sizes': [(e3, e3 + 8), (0x40, 0x48)]}}
     result = check_known('2.1.0', computed, sizes, known)
-    assert [ok for _, ok in result] == [True, False] + [True] * 6 + [True, False], result
+    assert [ok for _, ok in result] == [True, False] + [True] * 7 + [True, False], result
     assert result[0][0].startswith(f'agree main+{p1:#x}') and ' (window' not in result[0][0], result[0]
     assert result[1][0].startswith(f'disagree main+{p3b:#x}') and result[2][0].startswith(f'new main+{p2:#x}'), result
-    assert result[8][0].startswith('agree size pair') and result[9][0].startswith('disagree size pair'), result
+    assert result[9][0].startswith('agree size pair') and result[10][0].startswith('disagree size pair'), result
     assert check_known('3.0.1', computed, sizes, known) == []
     # The emitted table parses, resolves @page and passes the original-word check, as gen.py --patches runs it.
     with tempfile.TemporaryDirectory() as d:
@@ -886,7 +948,7 @@ def selftest():
         mods = [('main', 0x10000000, len(image)), ('sdk', 0x10400000, 0x1000)]
         table = patches.load(path, mods)
         assert table.sets == [(SET_NAME, SET_ENV, 1)]
-        assert sorted(table.sites['main']) == sorted([p1, p2, p3, p5, p7, p8, p9, a1, a2, b1, b2])
+        assert sorted(table.sites['main']) == sorted([p1, p2, p3, p5, p7, p8, p9, p10, a1, a2, b1, b2])
 
         class Mod:
             base = 0x10000000
@@ -906,8 +968,8 @@ def selftest():
             pass
         else:
             raise AssertionError('a changed original word must fail the check')
-    print('aspect_sites_xc2: selftest ok (7 computed-aspect sites of which 3 leaves, 4 constant loads, 4 unpatched, '
-          '3 size pairs, known-site and symbol checks)')
+    print('aspect_sites_xc2: selftest ok (8 computed-aspect sites of which 3 leaves and 1 from calls, the same without '
+          'symbols, 4 constant loads, 5 unpatched, 3 size pairs, known-site and symbol checks)')
 
 
 def main():
