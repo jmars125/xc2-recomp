@@ -99,6 +99,7 @@ static struct {
     PFN_vkCmdSetAlphaToCoverageEnableEXT set_a2c;
     char cache_path[PLAT_PATH_MAX * 2];
     VkPipeStats stats;
+    uint32_t sync_builds;              // synchronous builds outside P.lock; drained before layouts are destroyed
 } P = {.lock = PLAT_MUTEX_INIT};
 
 typedef struct Layout {
@@ -121,8 +122,8 @@ typedef struct Pipe {
     uint64_t hash;
     VkPipeInfo info;
     VkPipeBinding *bindings;
-    int building;                      // a background job owns info.pipeline (under P.lock)
-    struct Job *job;                   // that job while building
+    int building;                      // one thread or background job owns the build (under P.lock)
+    struct Job *job;                   // NULL for a synchronous build
     const struct Layout *lay;          // graphics: the layout it was entered with
     VkPipeline fast;                   // GPL: the fast-linked pipeline (kept until shutdown: recorded draws use it)
     uint8_t fast_tried;
@@ -1171,6 +1172,7 @@ static uint32_t vs_outs(const GfxShader *vs, const GfxShader *fs, GfxShaderIo io
 
 // ---- pipeline cache table
 
+// Caller holds P.lock; a shared lock is enough for lookup.
 static Pipe *pipe_find(const void *key, size_t size, uint64_t h) {
     for (Pipe *p = pipes[h % PIPE_BUCKETS]; p; p = p->next)
         if (p->hash == h && p->key_size == size && !memcmp(p->key, key, size)) return p;
@@ -1199,6 +1201,13 @@ static Pipe *pipe_add(const void *key, size_t size, uint64_t h, VkPipeline pipel
     p->next = *head;
     *head = p;
     return p;
+}
+
+// The memo in runtime/vk_exec_draw.c prepare_draw reads the handle without P.lock. All changes after pipe_add
+// publishes the entry use release stores; the layout and bindings stay fixed, and fast handles live until shutdown.
+// Caller holds P.lock exclusively.
+static void pipe_publish(Pipe *p, VkPipeline pipeline) {
+    __atomic_store_n(&p->info.pipeline, pipeline, __ATOMIC_RELEASE);
 }
 
 // ---- graphics pipelines
@@ -2057,7 +2066,8 @@ static void pipe_worker(void *arg) {
             VkPipeline f = gpl_link(&j->s, &j->k, j->p->lay, 1, &final);   // releases P.lock while building
             j->p->fast_tried = 1;
             if (f && !j->p->info.pipeline) {
-                j->p->fast = j->p->info.pipeline = f, P.g.wlinks++;
+                j->p->fast = f, P.g.wlinks++;
+                pipe_publish(j->p, f);
                 plat_cond_broadcast(&done_cv);
                 j->low = 1, j->worker = -1, P.g.requeued++;
                 j->prev = NULL, j->next = A.low;
@@ -2073,7 +2083,7 @@ static void pipe_worker(void *arg) {
         plat_mutex_unlock(&P.lock);
         VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
         plat_mutex_lock(&P.lock);
-        if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
+        if (pipe || !j->p->fast) pipe_publish(j->p, pipe);   // a failed optimised build keeps the fast-linked one
         if (pipe && j->p->fast) P.g.swaps++;
         j->p->building = 0;
         j->p->job = NULL;
@@ -2131,7 +2141,7 @@ static void workers_drain(void) {
     }
     U.head = U.tail = NULL;
     while (A.inflight) plat_cond_wait(&A.idle, &P.lock);
-    while (U.running) plat_cond_wait(&done_cv, &P.lock);
+    while (U.running || P.sync_builds) plat_cond_wait(&done_cv, &P.lock);
     plat_mutex_unlock(&P.lock);
 }
 
@@ -2167,7 +2177,7 @@ static void promote(Pipe *p) {
 }
 
 // Enters a missing pipeline: built here (mode 0), or queued for a draw (1) or for the prebuild (2). Failures are
-// entered too. *queued: 1 when a job owns it. Caller holds P.lock.
+// entered too. *queued: 1 when a job owns it. Caller holds P.lock; a synchronous build releases it like lib_build.
 static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode, int *queued) {
     *queued = 0;
     const char *why = NULL;
@@ -2188,12 +2198,23 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
     else if (!(l = layout_get(&B))) why = "descriptor layout creation failed";
     char lack[128];
     if (!why && !layout_covers(s, l, span - 1, lack, sizeof lack)) why = lack, l = NULL;
-    VkPipeline pipe = VK_NULL_HANDLE;
+    Pipe *p = pipe_add(k, sizeof *k, h, VK_NULL_HANDLE, l, l ? &B : NULL,
+                       VK_PIPELINE_BIND_POINT_GRAPHICS, gfx_shader_inputs(s->vs, NULL));
+    if (!p) return NULL;   // no owner entry: do not start a build whose result cannot be kept
     Job *j = NULL;
     if (!why && mode && workers_start() && (j = calloc(1, sizeof *j))) {
         *j = (Job){.l = l, .fs_off = span - 1, .low = mode == 2, .prebuild = mode == 2, .worker = -1, .s = *s, .k = *k};
-    } else if (!why && !(pipe = create_graphics(s, k, l, span - 1))) {
-        why = "pipeline creation failed";
+    } else if (!why) {
+        p->building = 1;
+        P.sync_builds++;
+        plat_mutex_unlock(&P.lock);
+        VkPipeline pipe = create_graphics(s, k, l, span - 1);
+        plat_mutex_lock(&P.lock);
+        pipe_publish(p, pipe);
+        p->building = 0;
+        P.sync_builds--;
+        plat_cond_broadcast(&done_cv);
+        if (!pipe) why = "pipeline creation failed";
     }
     if (why) {
         P.stats.failures++;
@@ -2202,11 +2223,7 @@ static Pipe *pipe_miss(const VkPipeState *s, const GKey *k, uint64_t h, int mode
         P.stats.graphics++;
         if (mode != 2) keys_note(s);
     }
-    Pipe *p = pipe_add(k, sizeof *k, h, pipe, l, l ? &B : NULL, VK_PIPELINE_BIND_POINT_GRAPHICS, gfx_shader_inputs(s->vs, NULL));
-    if (!j || !p) {
-        free(j);
-        return p;
-    }
+    if (!j) return p;
     j->p = p;
     p->building = 1, p->job = j;
     if (mode == 2) {
@@ -2302,10 +2319,23 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
     GKey k;
     gkey_fill(s, &k);
     uint64_t h = key_hash(&k, sizeof k);
-    plat_mutex_lock(&P.lock);
+    plat_mutex_lock_shared(&P.lock);
     Pipe *p = pipe_find(&k, sizeof k, h);
+    if (p && (!p->building || p->info.pipeline)) {
+        if (!p->building) __atomic_fetch_add(&P.stats.hits, 1, __ATOMIC_RELAXED);
+        VkPipeline pipe = p->info.pipeline;
+        if (info) *info = &p->info;
+        plat_mutex_unlock_shared(&P.lock);
+        return pipe;
+    }
+    plat_mutex_unlock_shared(&P.lock);
+    plat_mutex_lock(&P.lock);
+    p = pipe_find(&k, sizeof k, h);   // a miss may have been entered while changing lock modes
     int queued;
     if (p) {
+        // A synchronous owner has no job to promote or fast-link. Before pipe_miss released P.lock, callers
+        // waited for that owner at the lock; keep the same result without blocking unrelated lookups.
+        while (p->building && !p->job) plat_cond_wait(&done_cv, &P.lock);
         if (!p->building) P.stats.hits++;
     } else {
         p = pipe_miss(s, &k, h, async, &queued);
@@ -2346,7 +2376,8 @@ static VkPipeline graphics(const VkPipeState *s, const VkPipeInfo **info, int as
         }
         if (final) p->fast_tried = 1;
         if (f && !p->info.pipeline) {
-            p->fast = p->info.pipeline = f;
+            p->fast = f;
+            pipe_publish(p, f);
             job_lower(p->job);
             plat_cond_broadcast(&done_cv);
         } else if (f) {
@@ -2401,7 +2432,7 @@ static void warm_builder(void *arg) {
         plat_mutex_unlock(&P.lock);
         VkPipeline pipe = create_graphics(&j->s, &j->k, j->l, j->fs_off);
         plat_mutex_lock(&P.lock);
-        if (pipe || !j->p->fast) j->p->info.pipeline = pipe;   // a failed optimised build keeps the fast-linked one
+        if (pipe || !j->p->fast) pipe_publish(j->p, pipe);   // a failed optimised build keeps the fast-linked one
         if (pipe && j->p->fast) P.g.swaps++;
         j->p->building = 0;
         j->p->job = NULL;
@@ -2599,41 +2630,6 @@ static struct {
     PlatMutex stat;
 } LB = {.stat = PLAT_MUTEX_INIT};
 
-VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
-    if (info) *info = NULL;
-    if (!cs || !ensure_init()) return VK_NULL_HANDLE;
-    struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
-    uint64_t h = key_hash(&k, sizeof k);
-    plat_mutex_lock(&P.lock);
-    Pipe *p = pipe_find(&k, sizeof k, h);
-    if (p) {
-        P.stats.hits++;
-    } else {
-        const char *why = NULL;
-        Bindings B = {0};
-        Layout *l = compute_layout(cs, &B, &why);
-        VkPipeline pipe = VK_NULL_HANDLE;
-        if (!why) {
-            uint64_t p0 = perf_begin();
-            pipe = compute_create(cs, l);
-            perf_end(PERF_PIPE, p0);
-            if (!pipe) why = "pipeline creation failed";
-        }
-        if (why) {
-            P.stats.failures++;
-            rt_log("vk_pipeline: compute pipeline not built: %s", why);
-        } else {
-            P.stats.compute++;
-            LB.cs_draw++;
-        }
-        p = pipe_add(&k, sizeof k, h, pipe, l, l ? &B : NULL, VK_PIPELINE_BIND_POINT_COMPUTE, 0);
-    }
-    plat_mutex_unlock(&P.lock);
-    if (!p) return VK_NULL_HANDLE;
-    if (info) *info = &p->info;
-    return p->info.pipeline;
-}
-
 static void lb_lock(void) {
     plat_thread_priority(PLAT_PRIO_NORMAL);
     plat_mutex_lock(&P.lock);
@@ -2642,6 +2638,72 @@ static void lb_lock(void) {
 static void lb_unlock(void) {
     plat_mutex_unlock(&P.lock);
     if (LB.idle) plat_thread_priority(PLAT_PRIO_IDLE);
+}
+
+// Caller holds P.lock. Draws and runtime/vk_pipeline.c lb_compute share one owner entry, including while building.
+// A failed prebuild is removed so a later dispatch can retry, as before; waiters re-find the key after each wake.
+static Pipe *compute_get(const GfxShader *cs, int prebuild, int *have) {
+    struct { const GfxShader *cs; uint32_t compute, pad; } k = {cs, 1, 0};
+    uint64_t h = key_hash(&k, sizeof k);
+    Pipe *p;
+    *have = 0;
+    while ((p = pipe_find(&k, sizeof k, h)) && p->building)
+        plat_cond_wait(&done_cv, &P.lock);
+    if (p) {
+        *have = 1;
+        return p;
+    }
+    const char *why = NULL;
+    Bindings B = {0};
+    Layout *l = compute_layout(cs, &B, &why);
+    if (prebuild && why) return NULL;
+    p = pipe_add(&k, sizeof k, h, VK_NULL_HANDLE, l, l ? &B : NULL, VK_PIPELINE_BIND_POINT_COMPUTE, 0);
+    if (!p) return NULL;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    if (!why) {
+        p->building = 1;
+        P.sync_builds++;
+        if (prebuild) lb_unlock();
+        else plat_mutex_unlock(&P.lock);
+        uint64_t p0 = prebuild ? 0 : perf_begin();
+        pipe = compute_create(cs, l);
+        if (!prebuild) perf_end(PERF_PIPE, p0);
+        if (prebuild) lb_lock();
+        else plat_mutex_lock(&P.lock);
+        pipe_publish(p, pipe);
+        p->building = 0;
+        P.sync_builds--;
+        plat_cond_broadcast(&done_cv);
+        if (!pipe) why = "pipeline creation failed";
+    }
+    if (why && prebuild) {
+        Pipe **at = &pipes[h % PIPE_BUCKETS];
+        while (*at != p) at = &(*at)->next;
+        *at = p->next;
+        free(p->bindings), free(p);
+        return NULL;
+    }
+    if (why) {
+        P.stats.failures++;
+        rt_log("vk_pipeline: compute pipeline not built: %s", why);
+    } else {
+        P.stats.compute++;
+        if (!prebuild) LB.cs_draw++;
+    }
+    return p;
+}
+
+VkPipeline vk_pipeline_compute(const GfxShader *cs, const VkPipeInfo **info) {
+    if (info) *info = NULL;
+    if (!cs || !ensure_init()) return VK_NULL_HANDLE;
+    plat_mutex_lock(&P.lock);
+    int have;
+    Pipe *p = compute_get(cs, 0, &have);
+    if (have) P.stats.hits++;
+    VkPipeline pipe = p ? p->info.pipeline : VK_NULL_HANDLE;
+    if (info && p) *info = &p->info;
+    plat_mutex_unlock(&P.lock);
+    return pipe;
 }
 
 static void lb_count(int kind, int what, double ms) {   // what: 0 built, 1 already there, 2 failed, 3 cache only
@@ -2670,31 +2732,13 @@ static uint32_t vs_union_peek(const GfxShader *vs, GfxShaderIo fin[32]) {
 }
 
 static void lb_compute(const GfxShader *cs) {
-    struct { const GfxShader *cs; uint32_t compute; } k = {cs, 1};
-    uint64_t h = key_hash(&k, sizeof k);
-    Bindings B = {0};
-    const char *why = NULL;
-    lb_lock();
-    Layout *l = pipe_find(&k, sizeof k, h) ? NULL : compute_layout(cs, &B, &why);
-    int have = !l && !why;
-    lb_unlock();
-    if (!l) {
-        lb_count(2, have ? 1 : 2, 0);
-        return;
-    }
     double t0 = now_ms();
-    VkPipeline pipe = compute_create(cs, l);
-    double ms = now_ms() - t0;
     lb_lock();
-    if (pipe && !pipe_find(&k, sizeof k, h)) {
-        pipe_add(&k, sizeof k, h, pipe, l, &B, VK_PIPELINE_BIND_POINT_COMPUTE, 0);
-        P.stats.compute++;
-    } else if (pipe) {
-        vkDestroyPipeline(P.device, pipe, NULL);
-        have = 1;
-    }
+    int have;
+    Pipe *p = compute_get(cs, 1, &have);
+    int what = have ? 1 : p && p->info.pipeline ? 0 : 2;
     lb_unlock();
-    lb_count(2, pipe ? have : 2, ms);
+    lb_count(2, what, have ? 0 : now_ms() - t0);
 }
 
 // The pre-rasterization (vertex) or fragment-shader library of one shader with the LB state.
@@ -3023,9 +3067,10 @@ void vk_pipeline_set_dynamic(VkCommandBuffer cb, const VkPipeState *s) {
 // ---- statistics, persistence, teardown
 
 void vk_pipeline_stats(VkPipeStats *s) {
-    plat_mutex_lock_shared(&P.lock);
+    // runtime/vk_pipeline.c graphics increments hits atomically under a shared lock; exclude those writers too.
+    plat_mutex_lock(&P.lock);
     *s = P.stats;
-    plat_mutex_unlock_shared(&P.lock);
+    plat_mutex_unlock(&P.lock);
 }
 
 static PlatMutex save_lock = PLAT_MUTEX_INIT;   // one cache save at a time; shutdown takes it to destroy the cache
