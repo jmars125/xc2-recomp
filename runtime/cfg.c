@@ -50,7 +50,7 @@ static const char *const known[] = {
     "SHADER_MEMO", "SHARED_FONTS", "SHARPNESS", "SHOTS", "SHOTS_DIR", "SHOTS_FULL", "SPEED_PROBE", "SPIN", "SPIN_HANDOFF_US", "SPLIT_DRAWS", "SUBMIT_WAIT", "SPLIT_US", "SWKBD_ANSWER",
     "SWKBD_TEST", "TEST_PREPARE_SHADERS", "TEX_ALIAS", "TEX_MEMO", "TIMER_1MS", "TRACE", "UBO_SNAPSHOT", "UI_FIT", "UPSCALER", "VK_DYN_A2C", "VK_DYN_VERTEX", "VK_NO_FLOAT64",
     "VK_PRESENT", "VK_RECORDER", "VK_SSBO_ALIGN", "VK_SUBGROUP", "VK_SUBGROUP_PIN", "VK_VALIDATION", "VOLUME", "VRAM_HEADROOM", "VRAM_LIMIT", "VS_OUTS",
-    "WIND_GUARD", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_PROCS", "ZSTD_CHECK", "ZSTD_NATIVE",
+    "WIDE_VIEW", "WIND_GUARD", "WINDOW_SIZE", "XLATE", "XLATE_ID", "XLATE_PROCS", "ZSTD_CHECK", "ZSTD_NATIVE",
 };
 
 // The xc2.ini section a key cfg_set may write goes to when the file lacks it (xc2.ini.example's sections).
@@ -94,7 +94,7 @@ static const CfgMeta metas[] = {
     {"PERF_OVERLAY", "off", "off|fps|full", LIVE},
     {"OUTPUT_RES", "1920x1080", NULL, RESTART}, {"RENDER_SCALE", "game", "game|50|67|75|100", RESTART},
     {"UPSCALER", "fsr", "fsr|bilinear", LIVE}, {"SHARPNESS", "80", "0..100", LIVE},
-    {"PICTURE_FIT", "keep", "keep|stretch", LIVE},
+    {"PICTURE_FIT", "keep", "keep|stretch|widen", LIVE},
     {"DEVICE_PROFILE", "auto", "auto|desktop|deck", RESTART},
     // Game
     {"FPS_LIMIT", "60", "30|40|45|60|90|120|144|display", LIVE}, {"FPS60", "1", "0|1", LIVE},

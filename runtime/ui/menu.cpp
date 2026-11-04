@@ -543,8 +543,8 @@ static void tab_screen(float scale) {
     row_render_scale();
     static const UiTextId up[] = {UI_MENU_UPSCALER_FSR, UI_MENU_UPSCALER_BILINEAR};
     opt_choice("XC2_UPSCALER", UI_MENU_UPSCALER, up, 2, UI_MENU_UPSCALER_DESC);
-    static const UiTextId fit[] = {UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH};
-    opt_choice("XC2_PICTURE_FIT", UI_MENU_PICTURE_FIT, fit, 2, UI_MENU_PICTURE_FIT_DESC);
+    static const UiTextId fit[] = {UI_MENU_PICTURE_FIT_KEEP, UI_MENU_PICTURE_FIT_STRETCH, UI_MENU_PICTURE_FIT_WIDEN};
+    opt_choice("XC2_PICTURE_FIT", UI_MENU_PICTURE_FIT, fit, 3, UI_MENU_PICTURE_FIT_DESC);
     opt_slider("XC2_SHARPNESS", UI_MENU_SHARPNESS, 0, 100, UI_MENU_SHARPNESS_DESC, 5, "%.0f %%");
     opt_end();
 }

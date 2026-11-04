@@ -66,8 +66,10 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_PICTURE_FIT] = "Picture shape",
     [UI_MENU_PICTURE_FIT_DESC] = "When the window's shape differs from the game resolution's (a 16:9 game on the Steam "
                                  "Deck's 16:10 screen), keep the picture's proportions with black bars, or stretch it "
-                                 "over the whole window.",
+                                 "over the whole window. Widen view fills a wider window with more of the scene at the "
+                                 "sides; the menus and the interface are stretched.",
     [UI_MENU_PICTURE_FIT_KEEP] = "Keep (bars)", [UI_MENU_PICTURE_FIT_STRETCH] = "Stretch",
+    [UI_MENU_PICTURE_FIT_WIDEN] = "Widen view",
     [UI_MENU_SHARPNESS] = "FSR sharpness",
     [UI_MENU_SHARPNESS_DESC] = "Sharpening after FSR scaling; 0 turns it off.",
 
@@ -299,8 +301,11 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_UPSCALER_FSR] = "AMD FSR 1", [UI_MENU_UPSCALER_BILINEAR] = "Билинейное",
     [UI_MENU_PICTURE_FIT] = "Пропорции картинки",
     [UI_MENU_PICTURE_FIT_DESC] = "Когда форма окна отличается от формы разрешения игры (игра 16:9 на экране Steam Deck "
-                                 "16:10), сохранять пропорции картинки с чёрными полосами или растягивать её на всё окно.",
+                                 "16:10), сохранять пропорции картинки с чёрными полосами или растягивать её на всё окно. "
+                                 "«Расширить обзор» заполняет более широкое окно сценой по бокам; меню и интерфейс "
+                                 "растягиваются.",
     [UI_MENU_PICTURE_FIT_KEEP] = "Сохранять (полосы)", [UI_MENU_PICTURE_FIT_STRETCH] = "Растягивать",
+    [UI_MENU_PICTURE_FIT_WIDEN] = "Расширить обзор",
     [UI_MENU_SHARPNESS] = "Резкость FSR",
     [UI_MENU_SHARPNESS_DESC] = "Повышение резкости после масштабирования FSR; 0 выключает его.",
 

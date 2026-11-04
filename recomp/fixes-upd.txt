@@ -31,3 +31,17 @@ site wind main 1abcd8 97fffeba @host:fd0
 set hipcwake XC2_HIPC_BROADCAST 1
 site hipcwake sdk 525f4 940ddbb9 9400cf82
 site hipcwake sdk 52684 940ddb95 9400cf5e
+
+# Widen view (XC2_PICTURE_FIT=widen; sites from Aegis A101). The scene's projection takes its aspect from a size,
+# main+0x7e3910 (width / height stored at the view's +0x4c0), and the camera's matrices and frustum from its +0x1f0
+# (main+0x6cba0c, +0x6cba90, +0x6cbc24). Each 16:9 aspect (within 0.01 of patch page +0x108, 16/9; +0x10c holds 0.01)
+# is multiplied by +0x110, which runtime/gfx_present.c present_image writes from the window's shape (1 unless the
+# picture is widened), so a wider window sees more at the sides with the same vertical angle; other shapes, such as
+# menu portraits, are left alone. x8 and the two float registers each site uses are dead there; no flags are written.
+#   ldr s1, [x8, #0x108]; ldr s2, [x8, #0x10c]; fabd s1, s0, s1; fcmgt s1, s2, s1; ldr s2, [x8, #0x110]
+#   fmul s2, s0, s2; bit v0.8b, v2.8b, v1.8b         (value s0, s2, s14, s8; scratch s1/s2, s3/s4, s1/s6, s1/s2)
+set wide XC2_WIDE_VIEW 1
+site wide main 7e3910 bd04c260 @page:x8 bd410901 bd410d02 7ea1d401 7ea1e441 bd411102 1e220802 2ea11c40 bd04c260
+site wide main 6cba0c bd41f262 bd41f262 @page:x8 bd410903 bd410d04 7ea3d443 7ea3e483 bd411104 1e240844 2ea31c82
+site wide main 6cba90 bd41f26e bd41f26e @page:x8 bd410901 bd410d06 7ea1d5c1 7ea1e4c1 bd411106 1e2609c6 2ea11cce
+site wide main 6cbc24 bd41f108 bd41f108 @page:x8 bd410901 bd410d02 7ea1d501 7ea1e441 bd411102 1e220902 2ea11c48
