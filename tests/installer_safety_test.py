@@ -9,11 +9,12 @@ import os
 import re
 import shutil
 import stat
+import struct
 import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from unittest import mock
 
@@ -21,6 +22,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from installer import steps  # noqa: E402
 from installer.steps import extract  # noqa: E402
+import exefs_xc2  # noqa: E402  (tools/, on the path once installer.steps is imported)
+import extract_exefs  # noqa: E402  (the retargeted module tools/exefs_xc2.py registered)
 from installer.events import Reporter  # noqa: E402
 from installer.runner import InstallError  # noqa: E402
 
@@ -150,6 +153,58 @@ class KeysFolderTest(unittest.TestCase):
             steps.Check().run(ctx)
         self.assertEqual([p for p in left if p.exists()], [])
         self.assertEqual([p for p in kept if not p.exists()], [])
+
+
+def pfs0(names):
+    """A PFS0 of empty files under these names."""
+    strings = b''.join(n.encode() + b'\0' for n in names)
+    table, name_at = b'', 0
+    for name in names:
+        table += struct.pack('<QQII', 0, 0, name_at, 0)
+        name_at += len(name.encode()) + 1
+    return b'PFS0' + struct.pack('<III', len(names), len(strings), 0) + table + strings
+
+
+class PartitionNameTest(unittest.TestCase):
+    UNSAFE = ('C:probe.txt', 'C:', 'c:\\x', 'file.txt:stream', 'NUL', 'nul.txt', 'CON', 'con.tar.gz', 'AUX', 'PRN.x', 'COM1',
+              'lpt9.dat', 'COM\u00b9', 'CONIN$', 'NUL .txt', 'name.', 'name ', ' name', 'a\nb', 'a\x01b', 'a\x7fb', 'a?b', 'a*b',
+              'a|b', 'a"b', 'a<b', 'a>b', '.', '..', '', 'a/b', 'a\\b', '\\\\srv\\share\\x')
+    SAFE = ('main', 'main.npdm', 'rtld', 'sdk', 'subsdk0', 'secure', 'normal', 'update', 'logo',
+            '0123456789abcdef0123456789abcdef.cnmt.nca', '0123456789abcdef0123456789abcdef.nca',
+            '01000000000000000000000000000000.tik', '01000000000000000000000000000000.cert', 'COM10', 'console.txt',
+            'nullable', '.hidden', 'файл.nca')
+
+    def test_a_drive_form_would_leave_the_output_folder(self):
+        # Why the vendored check is not enough: it has no slash and no dots, and Windows paths drop the left side.
+        self.assertEqual(str(PureWindowsPath('out') / 'C:probe.txt'), 'C:probe.txt')
+
+    def test_names(self):
+        self.assertEqual([n for n in self.UNSAFE if exefs_xc2.safe_partition_name(n)], [])
+        self.assertEqual([n for n in self.SAFE if not exefs_xc2.safe_partition_name(n)], [])
+
+    def test_the_swap_reaches_the_table_reader(self):
+        for name in ('C:probe.txt', 'NUL', 'name.', 'a/b', '..'):
+            with self.assertRaisesRegex(ValueError, 'Unsafe partition filename'):
+                extract_exefs.partition_entries(io.BytesIO(pfs0([name])), 0, 1 << 20)
+        self.assertEqual([e[0] for e in extract_exefs.partition_entries(io.BytesIO(pfs0(['main', 'main.npdm'])), 0, 1 << 20)],
+                         ['main', 'main.npdm'])
+
+    def test_the_extraction_script_refuses_a_crafted_package(self):
+        # The script runs in a process of its own: its module has to get the swap too.
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            game = d / 'crafted.nsp'
+            game.write_bytes(pfs0(['C:probe.nca']))
+            keys = d / 'dummy.keys'
+            keys.write_text('header_key = ' + '00' * 32 + '\n')
+            with self.assertRaises(ValueError):
+                extract.extract_exefs(game, keys, d / 'out', d, update=False)
+            self.assertIn('Unsafe partition filename', (d / 'extract_exefs-out.log').read_text(encoding='utf-8'))
+            self.assertFalse((d / 'out' / 'exefs').exists() and list((d / 'out' / 'exefs').iterdir()))
+
+    def test_the_vendored_file_is_left_alone(self):
+        source = (ROOT / 'tools' / 'vendor' / 'macnativegames' / 'extract_exefs.py').read_text(encoding='utf-8')
+        self.assertNotIn('safe_partition_name', source)
 
 
 class HostCheckTest(unittest.TestCase):
