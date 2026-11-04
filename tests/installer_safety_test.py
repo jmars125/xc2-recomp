@@ -21,6 +21,7 @@ from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+from installer import runner  # noqa: E402
 from installer import state as statefile  # noqa: E402
 from installer import steps  # noqa: E402
 from installer.steps import extract  # noqa: E402
@@ -323,6 +324,148 @@ class RomfsRepairTest(unittest.TestCase):
         os.utime(image, ns=(st.st_atime_ns, st.st_mtime_ns))
         self.assertFalse(self.context().will_run('extract'))
         self.assertFalse(self.step.verify(self.context(), self.state['steps']['extract']))
+
+
+# hactool's stand-in for add-on content: FAKE_LEVEL decides what the check of RomFS level 3 says, and the exit code stays
+# 0 as hactool's does when a hash check fails.
+FAKE_DLC_HACTOOL = r'''#!PYTHON
+import os, sys
+for arg in sys.argv:
+    if arg.startswith('--romfsdir='):
+        out = arg.split('=', 1)[1]
+        os.makedirs(os.path.join(out, 'data'))
+        open(os.path.join(out, 'data', 'x.bin'), 'w').write('add-on ' + os.path.basename(out))
+state = os.environ.get('FAKE_LEVEL', 'GOOD')
+for i in range(6):
+    if state != 'NONE':
+        print(f'        Level {i} ({state if i == 3 else "GOOD"}):')
+'''
+
+
+@unittest.skipUnless(os.name == 'posix', 'the stand-in for hactool is a script')
+class DlcTest(unittest.TestCase):
+    """The add-on content step and its check on a finished install, with made-up files and packages."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.dest, self.temp = self.dir / 'dest', self.dir / 'temp'
+        self.dest.mkdir()
+        self.temp.mkdir()
+        self.keys = self.dir / 'dummy.keys'
+        self.keys.write_text('header_key = ' + '00' * 32 + '\n')
+        tool = self.dir / 'hactool'
+        tool.write_text(FAKE_DLC_HACTOOL.replace('PYTHON', sys.executable))
+        tool.chmod(0o755)
+        self.layout = SimpleNamespace(release='r1', hactool=tool, missing=lambda: [],
+                                      expected=lambda version: self.dir / 'expected.json')
+        (self.dir / 'expected.json').write_text('{}')
+        self.state = statefile.empty('r1')
+        self.state['version'] = '3.0.1'
+        self.state['lang'] = 'en-US'
+        self.nsp = {}
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def package(self, name, *indices):
+        path = self.dir / name
+        path.write_bytes(b'dummy')
+        self.nsp[path.name] = [(f'{steps.AOC_BASE + i:016X}', {'nca_offset': 0, 'size': 1}) for i in indices]
+        return path
+
+    def run_steps(self, dlc=(), keys=True, verify=False, **env):
+        """Check and Dlc on the folder, with the extraction current and the host fine. Returns (result, the error event)."""
+        options = SimpleNamespace(lang=None, base=None, update=None, keys=self.keys if keys else None, dlc=list(dlc))
+        out = io.StringIO()
+        ctx = Context(self.layout, self.dest, self.temp, Reporter(out=out), options, state=self.state, verify=verify)
+        extract_step = steps.Extract()
+        self.state['steps'].setdefault('extract', {'key': 'k', 'release': 'r1'})
+        with mock.patch.object(steps.Extract, 'key', return_value='k'), \
+                mock.patch.object(steps.Extract, 'current', return_value=True), \
+                mock.patch.object(steps.Extract, 'verify', return_value=True), \
+                mock.patch.object(steps.Check, 'host'), mock.patch.object(steps.Check, 'space'), \
+                mock.patch.object(steps, 'dlc_records', side_effect=lambda f, p, k: (self.nsp[p.name], {bytes(16): bytes(16)})), \
+                mock.patch.object(steps, 'copy_range', side_effect=lambda s, o, n, t: Path(t).write_bytes(b'nca')), \
+                mock.patch.dict(os.environ, env):
+            result = runner.run_steps([steps.Check(), extract_step, steps.Dlc()], ctx)
+        events = [json.loads(line) for line in out.getvalue().splitlines()]
+        return result, next((e for e in events if e['type'] == 'error'), None)
+
+    def installed(self, *indices):
+        return self.state['steps']['dlc']['indices'] == list(indices) and \
+            all((self.dest / 'aoc' / str(i) / 'data' / 'x.bin').is_file() for i in indices)
+
+    def test_adding_content_to_a_current_install_asks_only_for_the_keys(self):
+        self.assertEqual(self.run_steps(), ('ok', None))
+        result, error = self.run_steps([self.package('a.nsp', 1)], keys=False)
+        self.assertEqual((result, error['id']), ('failed', 'check.keys_needed'))
+        self.assertEqual(self.run_steps([self.package('a.nsp', 1)]), ('ok', None))
+        self.assertTrue(self.installed(1))
+
+    def test_a_missing_chosen_file_is_named(self):
+        self.assertEqual(self.run_steps(), ('ok', None))
+        result, error = self.run_steps([self.dir / 'gone.nsp'])
+        self.assertEqual((result, error['id'], error['params']['input']), ('failed', 'check.input_missing', 'dlc'))
+
+    def test_a_merged_package_installs_every_title(self):
+        self.assertEqual(self.run_steps([self.package('all.nsp', 1, 2)]), ('ok', None))
+        self.assertTrue(self.installed(1, 2))
+
+    def test_a_second_run_keeps_the_first_runs_content_in_the_record(self):
+        self.run_steps([self.package('a.nsp', 1)])
+        self.assertEqual(self.run_steps([self.package('b.nsp', 2)]), ('ok', None))
+        self.assertTrue(self.installed(1, 2))
+
+    def test_a_hash_failure_stops_and_leaves_no_folder(self):
+        result, error = self.run_steps([self.package('a.nsp', 1)], FAKE_LEVEL='FAIL')
+        self.assertEqual((result, error['id'], error['params']['input']), ('failed', 'check.input_damaged', 'dlc'))
+        self.assertFalse((self.dest / 'aoc' / '1').exists())
+        self.assertNotIn('dlc', self.state['steps'])
+
+    def test_a_run_without_hash_checks_fails(self):
+        result, error = self.run_steps([self.package('a.nsp', 1)], FAKE_LEVEL='NONE')
+        self.assertEqual((result, error['id']), ('failed', 'dlc.extract_failed'))
+        self.assertFalse((self.dest / 'aoc' / '1').exists())
+
+    def test_changed_contents_stop_the_check_until_replaced(self):
+        package = self.package('a.nsp', 1)
+        self.run_steps([package])
+        (self.dest / 'aoc' / '1' / 'data' / 'x.bin').write_text('damaged and longer')
+        result, error = self.run_steps()
+        self.assertEqual((result, error['id'], error['params']['indices']), ('failed', 'check.dlc_changed', '1'))
+        package.touch()
+        os.utime(package, (1, 1))   # another key, so the step runs with the file chosen again
+        self.assertEqual(self.run_steps([package]), ('ok', None))
+        self.assertEqual((self.dest / 'aoc' / '1' / 'data' / 'x.bin').read_text(), 'add-on 1')
+
+    def test_other_content_does_not_replace_changed_content(self):
+        self.run_steps([self.package('a.nsp', 1)])
+        (self.dest / 'aoc' / '1' / 'data' / 'x.bin').write_text('damaged')
+        result, error = self.run_steps([self.package('b.nsp', 2)])
+        self.assertEqual((error['id'], error['params']['indices']), ('check.dlc_changed', '1'))
+
+    def test_a_deleted_folder_is_dropped_from_the_record(self):
+        self.run_steps([self.package('a.nsp', 1, 2)])
+        shutil.rmtree(self.dest / 'aoc' / '1')
+        self.assertEqual(self.run_steps(), ('ok', None))
+        self.assertTrue(self.installed(2))
+
+    def test_verify_finds_damage_that_keeps_size_and_time(self):
+        self.run_steps([self.package('a.nsp', 1)])
+        data = self.dest / 'aoc' / '1' / 'data' / 'x.bin'
+        st = data.stat()
+        data.write_text('add-on 9')
+        os.utime(data, ns=(st.st_atime_ns, st.st_mtime_ns))
+        self.assertEqual(self.run_steps(), ('ok', None))   # the cheap check cannot see it
+        result, error = self.run_steps(verify=True)
+        self.assertEqual((error['id'], error['params']['indices']), ('check.dlc_changed', '1'))
+
+    def test_a_record_of_an_older_release_is_checked_by_its_folders(self):
+        (self.dest / 'aoc' / '1').mkdir(parents=True)
+        self.state['steps']['dlc'] = {'key': steps.fingerprint('dlc-1'), 'release': 'r1', 'indices': [1]}
+        self.assertEqual(self.run_steps(verify=True), ('ok', None))
+        self.assertEqual(self.state['steps']['dlc']['indices'], [1])
 
 
 class HostCheckTest(unittest.TestCase):
