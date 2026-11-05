@@ -236,6 +236,9 @@ emulation changed and this note is stale.
 Runtime probes, each a mode of `xc2.exe` (the list is at the top of `runtime/main.c`): `--probe-kernel`,
 `--probe-vkexec`, `--probe-nvn-tex` and `--probe-shader` cover most runtime changes.
 
+`tests\feedback_check.py` runs the attachment feedback decisions of `runtime\vk_exec.c` and `runtime\vk_exec_draw.c`
+against a fake Vulkan device, without a GPU or game files; run it after changing `feedback_prepare` or `feedback_scan`.
+
 Shaders: `.venv-py314\Scripts\python tools\shader_census.py --version <ver> --translate` extracts every Maxwell shader
 to `build\<ver>\shaders\` and runs it through the translator and `spirv-val`; failure groups go to `failures.txt`.
 `tools\xlate_smoke.py` checks the translator alone, without game files.
