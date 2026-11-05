@@ -8,7 +8,7 @@ with the bundled clang (hostcheck.c).
 Install folder: exefs/, romfs/ (romfs.bin, index.json), aoc/<index>/ (the add-on content's RomFS), profile/, xc2.exe
 and its DLLs, romfs-index.bin, xc2_xlate.exe, shader-prepared.bin, shader-cache/, xc2.ini, xc2-install.json.
 Temp folder (<temp>/<dest name>-<hash>): check/ (ExeFS of both inputs, the host check), gen/ (C), build/ (objects),
-logs/ (kept by the cleanup).
+keys/ (private folders of the key files hactool reads while it runs), logs/ (kept by the cleanup).
 """
 import hashlib
 import json
@@ -37,6 +37,7 @@ DEST_EXTRA = 4 * GiB      # beside the RomFS: shader and pipeline caches (about 
 TEMP_NEED = 3 * GiB       # generated C (about 0.9 GB) and objects
 HOSTCHECK = Path(__file__).resolve().parent / 'hostcheck.c'
 STAMP = '.install-key'
+KEYS_FOLDER = 'keys'   # in the temp folder: tools/extract.py private_keys_folder makes one folder per hactool job there
 PATCHES = 'patches-upd.txt'   # recomp/: code patch sets of 3.0.1 (recomp/patches.py)
 XLATE = 'xc2_xlate' + EXE   # the translator's name beside xc2.exe; runtime/gfx_shader.c starts it by this name
 
@@ -90,6 +91,17 @@ def replace_file(src, dst):
     tmp = dst.with_name(dst.name + '.tmp')
     shutil.copy2(src, tmp)
     os.replace(tmp, dst)
+
+
+def remove_stale_keys(ctx):
+    """Delete the key files a killed or powered-off run left behind: the private folders of the temp folder, and those of
+    older releases, which kept them beside the NCA copies. Runs first, whatever the rest of the setup then decides."""
+    stale = [ctx.temp / KEYS_FOLDER, *ctx.temp.glob('dlc/*.keys'), *ctx.dest.glob('update-merge-*/*.keys')]
+    for path in stale:
+        try:
+            remove(path)
+        except OSError as e:
+            ctx.reporter.log(f'could not remove old key files in {path}: {type(e).__name__}')
 
 
 def kill_tree(proc):
@@ -227,6 +239,7 @@ class Check(Step):
 
     def run(self, ctx):
         layout, rep, dest = ctx.layout, ctx.reporter, ctx.dest
+        remove_stale_keys(ctx)
         missing = layout.missing()
         if missing:
             raise InstallError('check.release_incomplete', paths=missing[:5])
@@ -250,9 +263,16 @@ class Check(Step):
         rep.progress('check', 'verify', force=True)
         ctx.verify_kept('check')
         ncas = 0
+        ctx.dlc_chosen = set()
         if ctx.will_run('extract'):
             rep.progress('check', 'inputs', force=True)
             ncas = self.inputs(ctx)
+        elif ctx.will_run('dlc') and dlc_inputs(ctx):   # add-on content for a finished install: only the keys are needed
+            rep.progress('check', 'inputs', force=True)
+            if not ctx.options.keys:
+                raise InstallError('check.keys_needed')
+            ctx.dlc_chosen = self.dlc_files(ctx, self.load_keys(ctx))
+        self.kept_dlc(ctx)
         self.space(ctx, ncas)
         if ctx.will_run('extract'):
             rep.progress('check', 'versions', force=True)
@@ -291,9 +311,14 @@ class Check(Step):
         devices = host['devices']
         if not devices:
             raise InstallError('check.vulkan_no_device')
-        if not any(tuple(d['api'][:2]) >= (1, 3) for d in devices):
+        recent = [d for d in devices if tuple(d['api'][:2]) >= (1, 3)]
+        if not recent:
             raise InstallError('check.vulkan_too_old',
                                devices=', '.join(f'{d["name"]} ({d["api"][0]}.{d["api"][1]})' for d in devices))
+        # runtime/vk_device.c pick_device skips a device lacking one of these, so the game would start with none
+        if all(d['missing'] for d in recent):
+            raise InstallError('check.vulkan_no_extension',
+                               devices='; '.join(f'{d["name"]} ({", ".join(d["missing"])})' for d in recent))
         kernel = linux_kernel()
         if kernel and kernel < (6, 7):
             # Without userfaultfd's asynchronous write protection nothing tracks the CPU's writes: the game copies whole
@@ -305,29 +330,54 @@ class Check(Step):
         """Open both files with the keys as the extraction will. Returns the bytes of both Program NCAs."""
         o = ctx.options
         for name in ('base', 'update', 'keys'):
-            path = getattr(o, name)
-            if not path:
+            if not getattr(o, name):
                 raise InstallError('check.inputs_needed')
-            if not Path(path).is_file():
-                raise InstallError('check.input_missing', input=name, path=str(path))
-        try:
-            keys = load_keys(Path(o.keys))
-        except (ValueError, OSError, UnicodeDecodeError):
-            raise InstallError('check.keys_unreadable') from None
-        if 'header_key' not in keys:
-            raise InstallError('check.keys_no_header_key')
+            if not Path(getattr(o, name)).is_file():
+                raise InstallError('check.input_missing', input=name, path=str(getattr(o, name)))
+        keys = self.load_keys(ctx)
         total = 0
         for name, is_update in (('base', False), ('update', True)):
             path = Path(getattr(o, name))
             with path.open('rb') as f:
                 total += self.open_input(f, path, keys, name, is_update)
-        for path in dlc_inputs(ctx):   # optional: each must hold this game's add-on content
+        ctx.dlc_chosen = self.dlc_files(ctx, keys)
+        del keys
+        return total
+
+    @staticmethod
+    def load_keys(ctx):
+        path = Path(ctx.options.keys)
+        if not path.is_file():
+            raise InstallError('check.input_missing', input='keys', path=str(path))
+        try:
+            keys = load_keys(path)
+        except (ValueError, OSError, UnicodeDecodeError):
+            raise InstallError('check.keys_unreadable') from None
+        if 'header_key' not in keys:
+            raise InstallError('check.keys_no_header_key')
+        return keys
+
+    @staticmethod
+    def dlc_files(ctx, keys):
+        """Open the chosen add-on content files; each must hold this game's. Returns the add-on indices they hold."""
+        chosen = set()
+        for path in dlc_inputs(ctx):
             if not path.is_file():
                 raise InstallError('check.input_missing', input='dlc', path=str(path))
             with path.open('rb') as f:
-                dlc_record(f, path, keys)
-        del keys
-        return total
+                chosen |= {aoc_index(title_id) for title_id, _ in dlc_records(f, path, keys)[0]}
+        return chosen
+
+    @staticmethod
+    def kept_dlc(ctx):
+        """Stop before a build when installed add-on content changed and no chosen file replaces it: the game would mount
+        it as it is. Only the player can put it right, by choosing its file again or deleting the folder."""
+        if not ctx.will_run('dlc'):
+            return
+        changed = Dlc.changed(ctx, ctx.record('dlc') or {}) | getattr(ctx, 'dlc_damaged', set())
+        unreplaced = sorted(changed - ctx.dlc_chosen)
+        if unreplaced:
+            raise InstallError('check.dlc_changed', indices=', '.join(map(str, unreplaced)), path=str(ctx.dest / 'aoc'))
 
     @staticmethod
     def open_input(f, path, keys, name, is_update):
@@ -483,7 +533,7 @@ class Extract(Step):
         ctx.save()
 
         dest.mkdir(parents=True, exist_ok=True)
-        for stale in dest.glob('update-merge-*'):   # a killed merge leaves its NCA copies (and key copies) behind
+        for stale in dest.glob('update-merge-*'):   # a killed merge leaves its NCA copies behind
             remove(stale)
         rep.progress('extract', 'exefs', force=True)
         staged = ctx.temp / 'check' / 'update' / 'exefs'
@@ -505,8 +555,8 @@ class Extract(Step):
             rep.warning('warn.npdm_differs', version=game_version(ctx))
 
         romfs = dest / 'romfs'
-        if self.id in ctx.forced:
-            remove(romfs)   # the full hash failed: index.json still claims the extraction's hash
+        if self.id in ctx.forced or not self.image_intact(ctx, romfs, expected):
+            remove(romfs)   # index.json still claims the extraction's hash, whatever the image holds now
         if not extract.romfs_verified(romfs, expected):
             self.merge(ctx, base, update, keys, romfs, expected)
         report = json.loads((romfs / 'index.json').read_text())
@@ -516,6 +566,24 @@ class Extract(Step):
         (dest / 'profile').mkdir(exist_ok=True)
         st = (romfs / 'romfs.bin').stat()
         return {'romfs_size': st.st_size, 'romfs_mtime_ns': st.st_mtime_ns}
+
+    def image_intact(self, ctx, romfs, expected):
+        """Whether an image already in place can be kept. extract.romfs_verified reads only index.json, the claim made
+        when the image was written, and this step records the image's size and time as verified, so a changed image is
+        hashed here: otherwise a repair would record damage as current. An image the record still describes costs no hash;
+        Context.verify_kept checks those. A missing image is for the caller to merge."""
+        image = romfs / 'romfs.bin'
+        if not image.is_file():
+            return True
+        st = image.stat()
+        record = ctx.record(self.id) or {}
+        if st.st_size == record.get('romfs_size') and st.st_mtime_ns == record.get('romfs_mtime_ns'):
+            return True
+        if st.st_size != expected['romfs']['size']:
+            return False
+        rep = ctx.reporter
+        digest = file_sha256(image, lambda d, t: rep.progress('extract', 'verify_romfs', d, t, 'bytes'))
+        return digest == expected['romfs']['sha256']
 
     def merge(self, ctx, base, update, keys, romfs, expected):
         dest, logs = ctx.dest, ctx.temp / 'logs'
@@ -533,7 +601,8 @@ class Extract(Step):
 
         watch.start()
         try:
-            extract.merge_update_romfs(base, update, keys, ctx.layout.hactool, romfs, logs, phase=phase)
+            extract.merge_update_romfs(base, update, keys, ctx.layout.hactool, romfs, logs, phase=phase,
+                                       key_root=ctx.temp / KEYS_FOLDER)
         except extract.DamagedFile as e:
             raise InstallError('check.input_damaged', input='base' if e.path == base else 'update', path=str(e.path),
                                detail=e.detail) from None
@@ -562,9 +631,9 @@ def dlc_inputs(ctx):
     return [Path(p) for p in (getattr(ctx.options, 'dlc', None) or [])]
 
 
-def dlc_record(f, path, keys):
-    """(title id, NCA record, title keys) of the add-on content in an opened NSP, the keys from its own ticket.
-    InstallError when it holds none of this game's."""
+def dlc_records(f, path, keys):
+    """([(title id, NCA record)] of the add-on content in an opened NSP, one per title, and the title keys from its
+    tickets). A merged package holds several titles. InstallError when it holds none of this game's."""
     try:
         kind, entries = container_entries(f, path.stat().st_size)
         tickets = common_tickets(f, entries)
@@ -572,68 +641,117 @@ def dlc_record(f, path, keys):
     except ValueError as e:
         raise_if_damaged(e, 'dlc', path)
         raise InstallError('check.file_unreadable', input='dlc', detail=str(e)) from None
+    found = {}
     for record, _ in records:
         if record['content_type'] == AOC_DATA and aoc_index(record['title_id']) is not None:
-            return record['title_id'], record, tickets
+            found.setdefault(record['title_id'], record)
+    if found:
+        return list(found.items()), tickets
     if any(int(record['title_id'], 16) & ~0xfff == TORNA_STANDALONE for record, _ in records):
         raise InstallError('check.dlc_is_torna_game', path=str(path))
     raise InstallError('check.dlc_not_game', path=str(path))
 
 
+def tree_stamp(folder):
+    """A cheap fingerprint of a folder: every file's path, size and modification time, no contents."""
+    h = hashlib.sha256()
+    for f in sorted(folder.rglob('*')):
+        if f.is_file():
+            st = f.stat()
+            h.update(f'{f.relative_to(folder).as_posix()}\0{st.st_size}\0{st.st_mtime_ns}\1'.encode())
+    return h.hexdigest()
+
+
 class Dlc(Step):
     """Extracts the RomFS of each add-on content file into aoc/<index>/, where xc2.exe mounts it (runtime/fs_host.c
-    mount_aoc). Without --dlc it keeps what an earlier run extracted."""
+    mount_aoc). Without --dlc it keeps what an earlier run extracted. The record holds, per index, a tree_stamp for the
+    cheap check and a fingerprint for the full one; a record from an older release has neither and is checked by the
+    folders alone."""
     id = 'dlc'
 
     def key(self, ctx):
         files = dlc_inputs(ctx)
         if not files:   # nothing chosen: whatever is recorded stays current
             return ctx.state.get('steps', {}).get('dlc', {}).get('key') or fingerprint('dlc-1')
-        return fingerprint('dlc-1', *(f'{p.name}:{p.stat().st_size}:{p.stat().st_mtime_ns}' for p in files))
+        # a missing file gets a key of its own: Check.dlc_files reports it
+        return fingerprint('dlc-1', *(f'{p.name}:{p.stat().st_size}:{p.stat().st_mtime_ns}' if p.is_file() else
+                                      f'{p.name}:missing' for p in files))
+
+    @staticmethod
+    def changed(ctx, record):
+        """The recorded indices whose folder exists and differs from the record."""
+        return {int(i) for i, tree in record.get('trees', {}).items()
+                if (ctx.dest / 'aoc' / i).is_dir() and tree_stamp(ctx.dest / 'aoc' / i) != tree['stamp']}
 
     def current(self, ctx, record):
-        return all((ctx.dest / 'aoc' / str(i)).is_dir() for i in record.get('indices', []))
+        return all((ctx.dest / 'aoc' / str(i)).is_dir() for i in record.get('indices', [])) \
+            and not self.changed(ctx, record)
+
+    def verify(self, ctx, record):
+        rep = ctx.reporter
+        rep.progress('check', 'verify_dlc', force=True)
+        ctx.dlc_damaged = {int(i) for i, tree in record.get('trees', {}).items()
+                           if fingerprint(ctx.dest / 'aoc' / i) != tree['sha256']}
+        return not ctx.dlc_damaged
+
+    def extract_one(self, ctx, path, title_id, record, tickets, hactool_keys, title_keys):
+        """The RomFS of one add-on content title into aoc/<index>/. Returns the index."""
+        index = aoc_index(title_id)
+        work, out = ctx.temp / 'dlc', ctx.dest / 'aoc' / str(index)
+        nca = work / f'{index}.nca'
+        copy_range(path, extract.record_offset(record), record['size'], nca)
+        fd = os.open(title_keys, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w') as keys_out:
+            for rights, key in tickets.items():
+                keys_out.write(f'{rights.hex()} = {key.hex()}\n')
+        remove(out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        code, log = extract.run_hactool([str(ctx.layout.hactool), '-y', '--disablekeywarns', '--suppresskeys',
+                                         '-k', str(hactool_keys), f'--romfsdir={out}', str(nca)],
+                                        dict(os.environ, MNG_TITLE_KEYS=str(title_keys)))
+        remove(nca)
+        log_path = ctx.temp / 'logs' / f'dlc-{index}.log'
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(log, encoding='utf-8')
+        # hactool still extracts, and exits with 0, when a hash check fails; as in tools/extract.py merge_update_romfs,
+        # its log decides, and all six levels must have been checked at all.
+        checked = '\n'.join(line for line in log.splitlines() if not extract.UNSIGNED.match(line))
+        if extract.HACTOOL_HASH_FAIL.search(checked):
+            remove(out)
+            raise InstallError('check.input_damaged', input='dlc', path=str(path),
+                               detail=f'its game data fails the hash check; see {log_path}')
+        if code or not out.is_dir() or not all(re.search(rf'Level {i} \(GOOD\)', log) for i in range(6)):
+            remove(out)
+            raise InstallError('dlc.extract_failed', path=str(path), log=str(log_path))
+        ctx.reporter.log(f'dlc: {path.name} is add-on content {index} ({title_id})')
+        return index
 
     def run(self, ctx):
         files, dest, rep = dlc_inputs(ctx), ctx.dest, ctx.reporter
-        if not files:
-            return {'indices': []}
-        keys_path = Path(ctx.options.keys)
-        keys = load_keys(keys_path)
-        work = ctx.temp / 'dlc'
-        remove(work)
-        work.mkdir(parents=True)
-        hactool_keys, title_keys = work / 'hactool.keys', work / 'title.keys'
-        hactool_prod_keys(keys_path, hactool_keys)
-        indices = []
-        try:
-            for n, path in enumerate(files):
-                rep.progress('dlc', 'extract', n, len(files), 'files')
-                with path.open('rb') as f:
-                    title_id, record, tickets = dlc_record(f, path, keys)
-                index = aoc_index(title_id)
-                nca, out = work / f'{index}.nca', dest / 'aoc' / str(index)
-                copy_range(path, extract.record_offset(record), record['size'], nca)
-                fd = os.open(title_keys, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-                with os.fdopen(fd, 'w') as keys_out:
-                    for rights, key in tickets.items():
-                        keys_out.write(f'{rights.hex()} = {key.hex()}\n')
-                remove(out)
-                out.parent.mkdir(parents=True, exist_ok=True)
-                code, log = extract.run_hactool([str(ctx.layout.hactool), '-y', '--disablekeywarns', '--suppresskeys',
-                                                 '-k', str(hactool_keys), f'--romfsdir={out}', str(nca)],
-                                                dict(os.environ, MNG_TITLE_KEYS=str(title_keys)))
-                (ctx.temp / 'logs').mkdir(parents=True, exist_ok=True)
-                (ctx.temp / 'logs' / f'dlc-{index}.log').write_text(log, encoding='utf-8')
-                if code or not out.is_dir():
-                    raise InstallError('dlc.extract_failed', path=str(path), log=str(ctx.temp / 'logs' / f'dlc-{index}.log'))
-                rep.log(f'dlc: {path.name} is add-on content {index} ({title_id})')
-                indices.append(index)
-        finally:
-            remove(hactool_keys)
-            remove(title_keys)
-        rep.progress('dlc', 'extract', len(files), len(files), 'files')
-        return {'indices': sorted(set(indices))}
+        before = ctx.record(self.id) or {}
+        # What an earlier run extracted stays, except a folder the player deleted to go without it.
+        indices = {i for i in before.get('indices', []) if (dest / 'aoc' / str(i)).is_dir()}
+        trees = {i: tree for i, tree in before.get('trees', {}).items() if int(i) in indices}
+        if files:
+            keys_path = Path(ctx.options.keys)
+            keys = load_keys(keys_path)
+            work = ctx.temp / 'dlc'
+            remove(work)
+            work.mkdir(parents=True)
+            with extract.private_keys_folder(ctx.temp / KEYS_FOLDER) as secret:
+                hactool_keys, title_keys = secret / 'hactool.keys', secret / 'title.keys'
+                hactool_prod_keys(keys_path, hactool_keys)
+                for n, path in enumerate(files):
+                    rep.progress('dlc', 'extract', n, len(files), 'files')
+                    with path.open('rb') as f:
+                        titles, tickets = dlc_records(f, path, keys)
+                    for title_id, record in titles:
+                        index = self.extract_one(ctx, path, title_id, record, tickets, hactool_keys, title_keys)
+                        indices.add(index)
+                        out = dest / 'aoc' / str(index)
+                        trees[str(index)] = {'stamp': tree_stamp(out), 'sha256': fingerprint(out)}
+            rep.progress('dlc', 'extract', len(files), len(files), 'files')
+        return {'indices': sorted(indices), 'trees': trees}
 
 
 # ---- 3. lift
@@ -801,7 +919,7 @@ class Cleanup(Step):
         rep.progress('cleanup', 'temp', force=True)
         for stale in dest.glob('update-merge-*'):
             remove(stale)
-        for name in ('gen', 'build', 'check', 'dlc'):
+        for name in ('gen', 'build', 'check', 'dlc', KEYS_FOLDER):
             remove(ctx.temp / name)
         return {}
 

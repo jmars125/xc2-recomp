@@ -14,6 +14,7 @@ imports the functions instead). Runs under .venv-py314. Key values are read by t
 printed.
 """
 import argparse
+import contextlib
 import hashlib
 import json
 import os
@@ -203,6 +204,22 @@ MERGE_PHASES = {'copy': '  copying the base and update Program NCAs', 'merge': '
                 'index': '  hashing and indexing the merged image'}
 
 
+@contextlib.contextmanager
+def private_keys_folder(root=None):
+    """A new folder only this user can read, for the key files hactool has to read by path, removed on the way out.
+    root: where to make it (the installer's temp folder), else the system's temp folder; never beside the output, which
+    can be a folder the player shares or backs up. tempfile.mkdtemp asks for mode 0o700, which Python 3.13 and later (the
+    release's 3.14) also apply on Windows as an access list for the user and administrators. A killed process leaves the
+    folder behind: installer/steps.py remove_stale_keys removes it on the next run."""
+    if root:
+        Path(root).mkdir(parents=True, exist_ok=True, mode=0o700)
+    folder = Path(tempfile.mkdtemp(prefix='keys-', dir=root))
+    try:
+        yield folder
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
 def run_hactool(command, environment):
     """(exit code, stdout and stderr with long hex strings removed). hactool prints UTF-8 (its manifest)."""
     completed = subprocess.run(command, env=environment, capture_output=True, encoding='utf-8', errors='replace')
@@ -226,11 +243,13 @@ def damaged_merge_input(hactool, hactool_keys, environment, base, update, base_n
                       f'damaged or incomplete. Copy them again from their source and retry; see {shown(log_path)}')
 
 
-def merge_update_romfs(base, update, keys_path, hactool, output, logs, phase=lambda name: say(MERGE_PHASES[name])):
+def merge_update_romfs(base, update, keys_path, hactool, output, logs, phase=lambda name: say(MERGE_PHASES[name]),
+                       key_root=None):
     """extract_update_romfs.merge() without its Darwin-only bounded view of the base: the base Program NCA is copied out.
 
     Needs room for both Program NCAs (about 17 GB together) and the merged image (about 17 GB). phase(name) is called
-    as each part of MERGE_PHASES starts.
+    as each part of MERGE_PHASES starts. The copies stay beside the output, on the disk with room for them; the key
+    files go to private_keys_folder(key_root).
     """
     if output.exists():
         shutil.rmtree(output)
@@ -240,14 +259,14 @@ def merge_update_romfs(base, update, keys_path, hactool, output, logs, phase=lam
     need = inputs[0][1]['size'] + inputs[1][1]['size'] + 18 * (1 << 30)
     require(shutil.disk_usage(output.parent).free > need, f'Need {need / (1 << 30):.0f} GiB free in {output.parent}')
     log_path = logs / f'merge_romfs-{output.parent.name}.log'
-    with tempfile.TemporaryDirectory(prefix='update-merge-', dir=output.parent) as tmp:
+    with private_keys_folder(key_root) as secret, tempfile.TemporaryDirectory(prefix='update-merge-', dir=output.parent) as tmp:
         tmp = Path(tmp)
-        title_keys = tmp / 'title.keys'
+        title_keys = secret / 'title.keys'
         fd = os.open(title_keys, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, 'w') as f:
             for rights, key in tickets.items():
                 f.write(f'{rights.hex()} = {key.hex()}\n')
-        hactool_keys = tmp / 'hactool.keys'
+        hactool_keys = secret / 'hactool.keys'
         hactool_prod_keys(keys_path, hactool_keys)
         phase('copy')
         base_nca, update_nca = tmp / 'base.nca', tmp / 'update.nca'

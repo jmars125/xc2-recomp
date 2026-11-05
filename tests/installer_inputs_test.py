@@ -65,7 +65,7 @@ class DlcTest(unittest.TestCase):
             path = Path(d) / 'dlc.nsp'
             path.write_bytes(b'')
             with self.assertRaises(InstallError) as e:
-                steps.dlc_record(None, path, {})
+                steps.dlc_records(None, path, {})
         return e.exception
 
     def test_standalone_torna_is_named(self):
@@ -83,7 +83,21 @@ class DlcTest(unittest.TestCase):
                 tempfile.TemporaryDirectory() as d:
             path = Path(d) / 'dlc.nsp'
             path.write_bytes(b'')
-            self.assertEqual(steps.dlc_record(None, path, {})[0], record['title_id'])
+            self.assertEqual(steps.dlc_records(None, path, {})[0], [(record['title_id'], record)])
+
+    def test_every_title_of_a_merged_package_is_found(self):
+        titles = [f'{steps.AOC_BASE + i:016X}' for i in (1, 2, 2)]
+        records = [({'content_type': steps.AOC_DATA, 'title_id': t, 'name': n}, None) for n, t in enumerate(titles)]
+        records.append(({'content_type': 1, 'title_id': titles[0], 'name': 'meta'}, None))
+        with mock.patch.object(steps, 'container_entries', return_value=('nsp', [])), \
+                mock.patch.object(steps, 'common_tickets', return_value={}), \
+                mock.patch.object(steps, 'nca_inventory', return_value=records), \
+                tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'dlc.nsp'
+            path.write_bytes(b'')
+            found = steps.dlc_records(None, path, {})[0]
+        self.assertEqual([t for t, _ in found], titles[:2])
+        self.assertEqual([r['name'] for _, r in found], [0, 1])
 
 
 if __name__ == '__main__':
