@@ -896,6 +896,17 @@ static int core_better_waiter(const RtThread *t, int c) {
     return 0;
 }
 
+// XC2_PRIO_RESCHED=1: SetThreadPriority takes effect on the virtual cores at once, as on Horizon, where the priority
+// change itself reschedules. It goes through core_kick and kern_checkpoint, so a holder gives its core up under the usual
+// rules (one holder per waiter, not while preemption is disabled). Off by default: without it a new priority counts from
+// the next core_take or core_grant, no game run has exercised it yet, and a change in core handoffs is what hung
+// MacNativeGames' game at "Continue" (see above). Holding G.
+static int g_prio_resched = -1;
+static int prio_resched_on(void) {
+    if (g_prio_resched < 0) g_prio_resched = cfg_bool("XC2_PRIO_RESCHED");
+    return g_prio_resched;
+}
+
 // Asks holders to give their cores up, one holder per waiter: waiters best first, each claims the worst holder worse
 // than itself on a core it may run on that no better waiter claimed (a request already pending is reused). Asking
 // every worse holder made several drop their cores for one waiter; the spare cores went to worse waiters, which asked
@@ -1506,6 +1517,11 @@ static void thr_free(RtThread *t) {   // holding G; t has exited and its handle 
             *p = t->all;
             break;
         }
+    // core_kick leaves a waiter's target in place until that waiter's core_take ends, and a waiter that lost its claim
+    // keeps polling it (ap_try). Every thread, not only g_core_wait: one that was granted a core and has not woken yet
+    // reads its target too (dg_done). The readers treat NULL as "no owner asked".
+    for (RtThread *w = g_all; w; w = w->all)
+        if (w->target == t) w->target = NULL;
     mem_kernel_free(t->tlr, TLR_SIZE + THREAD_OBJ_SIZE);
     mem_kernel_free(t->tls, TLS_SIZE);
     plat_aligned_free(t->cpu);
@@ -1662,6 +1678,14 @@ int kern_thread_state(uint32_t h) {
     return r;
 }
 
+uint32_t kern_thread_target(uint32_t handle) {
+    lock();
+    RtThread *t = h_get(handle, O_THREAD);
+    uint32_t r = t && t->target ? t->target->handle : 0;
+    unlock();
+    return r;
+}
+
 // CloseHandle: an event goes with its last end; a thread object once it has also exited.
 static uint32_t handle_close(uint32_t h) {
     unsigned i = h - 0x1000;
@@ -1808,9 +1832,18 @@ int kern_svc(Cpu *c, uint32_t imm) {
         }
         lock();
         RtThread *t = h_get((uint32_t)x[0], O_THREAD);
-        if (t) t->prio = (int)x[1];
+        int lowered = 0;
+        if (t) {
+            int old = t->prio;
+            t->prio = (int)x[1];
+            if (t->prio != old && g_core_wait && prio_resched_on()) {
+                core_kick();   // the thread may be a waiter now better than a holder, or a holder now worse than a waiter
+                lowered = t == tcur && t->prio > old;
+            }
+        }
         x[0] = t ? R_OK : R_BAD_HANDLE;
         unlock();
+        if (lowered) kern_checkpoint();   // does nothing unless core_kick chose this thread; rt_svc's came before the change
         return 1;
     }
     case 0x0E: {   // GetThreadCoreMask(w2 handle -> w1 core, x2 mask)
@@ -2210,9 +2243,16 @@ static Fiber *fiber_find(uint64_t addr) {
 
 static void fiber_switch_to(RtThread *t, const Cpu *from, Fiber *to);
 
-// After a host fiber switch: release the context left behind, and finish an ExitThread issued on a fiber.
-static void fiber_resumed(void) {
+// The host thread running the caller now. A fiber may come back from a switch on another host thread, and a compiler
+// may keep a thread-local's address across calls inside one function, so code after a switch reads it out of line.
+static __attribute__((noinline)) RtThread *fiber_thread_now(void) { return tcur; }
+
+// After a host fiber switch: restore the context's host depth into the thread running it now (ap_try reads the depth
+// of that thread, and each context counts its own host calls), release the context left behind, and finish an
+// ExitThread issued on a fiber. Out of line for the reason above.
+static __attribute__((noinline)) void fiber_resumed(int depth) {
     RtThread *t = tcur;
+    __atomic_store_n(&t->host_depth, depth, __ATOMIC_RELAXED);
     rt_fpcr_sync(t->cur);   // the host fiber resumes with its own MXCSR (platform.h fibers switch it)
     if (t->leaving) {
         __atomic_store_n(&t->leaving->running, 0, __ATOMIC_RELEASE);
@@ -2223,16 +2263,15 @@ static void fiber_resumed(void) {
 
 static void fiber_main(void *p) {
     Fiber *f = p;
-    fiber_resumed();
+    fiber_resumed(0);   // a new fiber starts at the top level
     Cpu *c = f->cpu;
-    tcur->host_depth = 0;   // a new fiber starts at the top level; each context restores its own depth on resume
     uint64_t next = rt_call(c, f->func, 1, f->arg);
     f->state = F_DONE;
     Fiber *n = NULL;
     if (next && !(n = fiber_find(next)))
         rt_fatal("fiber %#llx returned %#llx, which is not an initialized fiber", (unsigned long long)f->addr,
                  (unsigned long long)next);
-    fiber_switch_to(tcur, c, n);   // NULL: back to the thread's own context
+    fiber_switch_to(fiber_thread_now(), c, n);   // NULL: back to the context of the thread running this fiber now
     rt_fatal("fiber %#llx resumed after it finished", (unsigned long long)f->addr);
 }
 
@@ -2261,10 +2300,9 @@ static void fiber_switch_to(RtThread *t, const Cpu *from, Fiber *to) {
     t->leaving = t->fiber;
     t->fiber = to;
     t->cur = dst;
-    int depth = t->host_depth;
+    int depth = t->host_depth;   // on this context's stack, so it stays with the context while others run
     plat_fiber_switch(to ? to->host : t->base_fiber);
-    t->host_depth = depth;
-    fiber_resumed();
+    fiber_resumed(depth);        // t may no longer be the thread running this context
 }
 
 // InitializeFiber(x0 FiberType*, x1 function, x2 argument, x3 stack, x4 stack size, w5 flags)

@@ -25,7 +25,8 @@ static int failures;
 #define CHECK(cond, ...) do { if (!(cond)) { failures++; printf("  FAIL: " __VA_ARGS__); putchar('\n'); } } while (0)
 
 static uint64_t a_lock_waiter, a_cv_waiter, a_cv_order_waiter, a_arb_waiter, a_event_waiter, a_core_worker,
-    a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker;
+    a_exit_entry, a_exit_nested, a_fiber_fn, a_fiber_exit_thread, a_fiber_exit_fn, a_tick_worker, a_target_worker, a_migrate_a,
+    a_migrate_b, a_migrate_fiber, a_prio_holder;
 static uint64_t a_fib_init, a_fib_fin, a_fib_switch, a_fib_cur, tick_stub;
 
 // ---- helpers: SVCs through rt_svc, thread start and join
@@ -424,6 +425,117 @@ static void test_cores(Cpu *c) {
     CHECK(ok || !gate, "virtual cores");
 }
 
+// ---- a core waiter's target ends: core_kick leaves a waiter that lost its claim to a better one pointing at the owner.
+// The owner O starts on core 2 and may also run on core 1; W and the better B may only run on core 2. Both target O.
+// O's checkpoint gives core 2 to B and moves on to core 1, where it exits and its handle is closed, while W keeps
+// polling (core_take, ap_try). In round 0 the handle is closed first, so thr_free runs inside thread_finish; in round 1
+// it is closed after the exit. thr_free must leave no thread pointing at O: W's next ap_try would read freed memory
+// (under ASan, an error here; on a plain build, a poll of whichever thread reuses the block).
+typedef struct { volatile int go, on_core; } TargetJob;
+
+static void target_worker(Cpu *c) {
+    TargetJob *j = arg_p(c, 0);
+    j->on_core = 1;
+    while (!j->go) plat_pause();   // no SVC or indirect call: the core stays until go, whatever waits for it
+    exit_thread(c);
+}
+
+static uint32_t target_thread(Cpu *c, TargetJob *j, int prio, uint64_t mask) {
+    uint32_t h = create(c, a_target_worker, j, prio, 2);
+    CHECK(sv(c, 0x0F, h, 2, mask, 0) == 0, "SetThreadCoreMask(%#x)", h);
+    start(c, h);
+    return h;
+}
+
+// Until the waiter w targets the owner o: 5 s at most.
+static int wait_target(Cpu *c, uint32_t w, uint32_t o) {
+    for (int i = 0; i < 5000; i++) {
+        if (kern_thread_target(w) == o) return 1;
+        sleep_ms(c, 1);
+    }
+    return 0;
+}
+
+static void test_core_target(Cpu *c) {
+    if (cfg_bool("XC2_FREE_CORES")) {   // no core waits: nothing has a target
+        printf("core waiter target: not checked (XC2_FREE_CORES is set)\n");
+        return;
+    }
+    int ok = 1;
+    for (int round = 0; round < 2; round++) {
+        TargetJob o = {0}, w = {0}, b = {0};
+        uint32_t ho = target_thread(c, &o, 50, 6);
+        while (!o.on_core) sleep_ms(c, 1);
+        uint32_t hw = target_thread(c, &w, 40, 4);
+        int claimed = wait_target(c, hw, ho);
+        uint32_t hb = target_thread(c, &b, 30, 4);
+        claimed &= wait_target(c, hb, ho);
+        CHECK(claimed, "round %d: the waiters never targeted the owner", round);
+        if (round == 0) CHECK(sv(c, 0x16, ho, 0, 0, 0) == 0, "CloseHandle(owner %#x)", ho);
+        o.go = 1;
+        while (!b.on_core) sleep_ms(c, 1);
+        if (round == 1) join(c, ho);
+        sleep_ms(c, 20);   // W's polls land on the ended owner
+        int cleared = 0;
+        for (int i = 0; i < 5000 && !cleared; i++) {   // round 0: B runs before O has finished exiting
+            cleared = kern_thread_target(hw) == 0;
+            if (!cleared) sleep_ms(c, 1);
+        }
+        CHECK(cleared, "round %d: the waiter still targets an ended, closed owner", round);
+        CHECK(!w.on_core, "round %d: the waiter ran before the better thread gave its core up", round);
+        ok &= claimed && cleared && !w.on_core;
+        b.go = 1;
+        join(c, hb);
+        w.go = 1;
+        join(c, hw);
+    }
+    printf("core waiter target: cleared when the targeted owner exits and closes, in either order: %s\n",
+           ok ? "ok" : "FAIL");
+}
+
+// ---- SetThreadPriority and the virtual cores: on core 2, a holder H lowers itself below the waiter W, then a holder
+// has its waiter raised above it from outside. With XC2_PRIO_RESCHED=1 W gets the core at the SVC or at H's next SVC;
+// otherwise H keeps the core until it exits.
+typedef struct { TargetJob self, *w; int lower, w_ran; } PrioJob;
+
+static void prio_holder(Cpu *c) {
+    PrioJob *j = arg_p(c, 0);
+    j->self.on_core = 1;
+    while (!j->self.go) plat_pause();
+    if (j->lower) sv(c, 0x0D, KERN_H_CURRENT_THREAD, 58, 0, 0);
+    else sv(c, 0x10, 0, 0, 0, 0);   // any SVC: rt_svc's checkpoint
+    j->w_ran = j->w->on_core;
+    exit_thread(c);
+}
+
+static void test_set_priority(Cpu *c) {
+    if (cfg_bool("XC2_FREE_CORES")) {
+        printf("SetThreadPriority: not checked (XC2_FREE_CORES is set)\n");
+        return;
+    }
+    int want = cfg_bool("XC2_PRIO_RESCHED"), ok = 1;
+    for (int lower = 1; lower >= 0; lower--) {
+        TargetJob w = {.go = 1};   // W exits as soon as it runs, which gives the core back to H
+        PrioJob h = {.w = &w, .lower = lower};
+        uint32_t hh = create(c, a_prio_holder, &h, 45, 2);
+        start(c, hh);
+        while (!h.self.on_core) sleep_ms(c, 1);
+        uint32_t hw = create(c, a_target_worker, &w, lower ? 50 : 55, 2);
+        start(c, hw);
+        sleep_ms(c, 20);   // W reaches its core wait
+        CHECK(!w.on_core, "the waiter ran before any priority change");
+        if (!lower) CHECK(sv(c, 0x0D, hw, 40, 0, 0) == 0, "SetThreadPriority(waiter %#x)", hw);
+        h.self.go = 1;
+        join(c, hh);
+        join(c, hw);
+        CHECK(h.w_ran == want, "%s: the waiter %s", lower ? "the holder lowered itself" : "the waiter was raised",
+              h.w_ran ? "got the core" : "did not get the core");
+        ok &= h.w_ran == want;
+    }
+    printf("SetThreadPriority: a waiter that becomes better %s the core at the holder's SVC (XC2_PRIO_RESCHED=%d): %s\n",
+           want ? "gets" : "does not get", want, ok ? "ok" : "FAIL");
+}
+
 // ---- fibers: two fibers switch to each other; each checks its callee-saved registers, sp and tpidr survive
 typedef struct { uint64_t self, other; int id; } FiberJob;
 static volatile int32_t g_switches, g_runs[3];
@@ -491,6 +603,72 @@ static void test_fibers(Cpu *c) {
            ms * 1000.0 / (double)(g_switches ? g_switches : 1), g_fiber_bad, base_ok ? "preserved" : "CHANGED",
            ok ? "ok" : "FAIL");
     CHECK(ok, "fiber ping-pong");
+}
+
+// ---- a fiber resumed on another thread: the host depth goes with the fiber into the thread that runs it now. Thread A
+// starts fiber F, which raises its depth and switches back; thread B, at another depth, then resumes F. The depths are
+// written directly so that they differ, and tracking is on so that SwitchToFiber runs in hostfn_tracked as it does in the
+// game. A's depth must survive F's resume on B, F's must arrive on B, and SwitchToFiber's decrement must land on B too.
+#define DEPTH_A 3
+#define DEPTH_B 5
+#define DEPTH_F 40
+typedef struct { uint64_t fiber, stack; void *a, *b; int a_after, b_after, f_on_a, f_on_b, a_kept; volatile int stage; } MigrateJob;
+
+static void migrate_fiber(Cpu *c) {
+    MigrateJob *j = arg_p(c, 0);
+    int *d = kern_host_depth(c->thread);
+    j->f_on_a = c->thread == j->a && *d == 1;   // new fibers start at 0; this host function counts one
+    __atomic_store_n(d, *d + DEPTH_F, __ATOMIC_RELAXED);
+    rt_call(c, a_fib_switch, 1, (uint64_t)0);
+    d = kern_host_depth(c->thread);             // resumed on B
+    j->f_on_b = c->thread == j->b && *d == 1 + DEPTH_F;
+    __atomic_store_n(d, *d - DEPTH_F, __ATOMIC_RELAXED);
+    ret_x(c, 0);                                // back to the context of the thread now running: B's
+}
+
+static void migrate_a(Cpu *c) {
+    MigrateJob *j = arg_p(c, 0);
+    j->a = c->thread;
+    rt_call(c, a_fib_init, 6, j->fiber, a_migrate_fiber, ga(j), j->stack, (uint64_t)STACK, (uint64_t)0);
+    int *d = kern_host_depth(c->thread);
+    __atomic_store_n(d, DEPTH_A, __ATOMIC_RELAXED);
+    rt_call(c, a_fib_switch, 1, j->fiber);
+    j->a_after = *d;
+    j->stage = 1;
+    while (j->stage != 2) sleep_ms(c, 1);       // B resumes F meanwhile: each sleep's SVC counts on A and comes back
+    j->a_kept = *d == DEPTH_A;
+    __atomic_store_n(d, 0, __ATOMIC_RELAXED);
+    exit_thread(c);
+}
+
+static void migrate_b(Cpu *c) {
+    MigrateJob *j = arg_p(c, 0);
+    while (j->stage != 1) sleep_ms(c, 1);
+    j->b = c->thread;
+    int *d = kern_host_depth(c->thread);
+    __atomic_store_n(d, DEPTH_B, __ATOMIC_RELAXED);
+    rt_call(c, a_fib_switch, 1, j->fiber);
+    j->b_after = *d;
+    __atomic_store_n(d, 0, __ATOMIC_RELAXED);
+    j->stage = 2;
+    exit_thread(c);
+}
+
+static void test_fiber_migrate(Cpu *c) {
+    MigrateJob j = {.fiber = ga(mem_kernel_alloc(0x100, 16)), .stack = ga(mem_kernel_alloc(STACK, 16))};
+    int track = kern_host_track;
+    kern_host_track = 1;   // no guest thread runs here but the two below, and this one in sleeps: balanced throughout
+    uint32_t ha = create(c, a_migrate_a, &j, 44, -2), hb = create(c, a_migrate_b, &j, 44, -2);
+    start(c, ha);
+    start(c, hb);
+    join(c, ha);
+    join(c, hb);
+    kern_host_track = track;
+    rt_call(c, a_fib_fin, 1, j.fiber);
+    int ok = j.f_on_a && j.f_on_b && j.a_after == DEPTH_A && j.b_after == DEPTH_B && j.a_kept;
+    printf("fiber resumed on another thread: host depth on A %d (kept %d), on B %d, in the fiber on A %d, on B %d: %s\n",
+           j.a_after, j.a_kept, j.b_after, j.f_on_a, j.f_on_b, ok ? "ok" : "FAIL");
+    CHECK(ok, "host depth across a fiber migration");
 }
 
 // ---- ExitThread unwinding: from three nested host calls deep, and from a fiber
@@ -620,7 +798,10 @@ static void probe_main(Cpu *c) {
     test_arbiter(c);
     test_events(c);
     test_cores(c);
+    test_core_target(c);
+    test_set_priority(c);
     test_fibers(c);
+    test_fiber_migrate(c);
     test_exit(c);
     test_lifted_ticks(c);
     test_exit_process(c);
@@ -692,9 +873,14 @@ int probe_kernel(void) {
     a_core_worker = hostfn_register("probe-kernel core worker", core_worker);
     a_exit_entry = hostfn_register("probe-kernel exit entry", exit_entry);
     a_exit_nested = hostfn_register("probe-kernel exit nested", exit_nested);
+    a_prio_holder = hostfn_register("probe-kernel priority holder", prio_holder);
+    a_target_worker = hostfn_register("probe-kernel target worker", target_worker);
     a_fiber_fn = hostfn_register("probe-kernel fiber", fiber_fn);
     a_fiber_exit_thread = hostfn_register("probe-kernel fiber exit thread", fiber_exit_thread);
     a_fiber_exit_fn = hostfn_register("probe-kernel fiber exit", fiber_exit_fn);
+    a_migrate_a = hostfn_register("probe-kernel fiber migrate a", migrate_a);
+    a_migrate_b = hostfn_register("probe-kernel fiber migrate b", migrate_b);
+    a_migrate_fiber = hostfn_register("probe-kernel fiber migrate fiber", migrate_fiber);
     a_tick_worker = hostfn_register("probe-kernel tick worker", tick_worker);
     a_fib_init = hostfn_register(KERN_SYM_INITIALIZE_FIBER, kern_fiber_initialize);   // the loader's addresses
     a_fib_fin = hostfn_register(KERN_SYM_FINALIZE_FIBER, kern_fiber_finalize);

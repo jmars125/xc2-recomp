@@ -121,12 +121,15 @@ __attribute__((noinline, noreturn, cold)) static void bad_entry(Cpu *c) {
 }
 
 // kern_host_track: the call counted in the thread's host depth. Not a tail call, so the host stack holds this frame
-// while fn runs; longjmp out of fn (ExitThread) leaves the depth raised on a thread that ends.
+// while fn runs; longjmp out of fn (ExitThread) leaves the depth raised on a thread that ends. The thread is read again
+// after fn: on a guest fiber, fn may be SwitchToFiber, and the fiber may come back on another thread (kernel.c
+// fiber_switch_to sets c->thread and restores the depth there).
 __attribute__((noinline)) static void hostfn_tracked(Cpu *c, GuestFn fn) {
-    void *t = c->thread;
-    int *d = kern_host_depth(t);
+    int *d = kern_host_depth(c->thread);
     __atomic_store_n(d, *d + 1, __ATOMIC_RELAXED);
     fn(c);
+    void *t = c->thread;
+    d = kern_host_depth(t);
     int n = *d - 1;
     __atomic_store_n(d, n, __ATOMIC_RELAXED);
     if (!n && kern_preempt_pending(t)) kern_host_left(t);
