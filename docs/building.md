@@ -236,6 +236,10 @@ emulation changed and this note is stale.
 Runtime probes, each a mode of `xc2.exe` (the list is at the top of `runtime/main.c`): `--probe-kernel`,
 `--probe-vkexec`, `--probe-nvn-tex` and `--probe-shader` cover most runtime changes.
 
+On Linux, `python tests/vk_pipeline_lock_test.py` checks pipeline cache ownership, concurrent lookups, failure
+wakeups, memo publication and shutdown draining with fake builds and the real platform locks. It needs clang and
+Vulkan headers, but no SDL, GPU or game files; it also syntax-checks `runtime/vk_pipeline.c`.
+
 Shaders: `.venv-py314\Scripts\python tools\shader_census.py --version <ver> --translate` extracts every Maxwell shader
 to `build\<ver>\shaders\` and runs it through the translator and `spirv-val`; failure groups go to `failures.txt`.
 `tools\xlate_smoke.py` checks the translator alone, without game files.
